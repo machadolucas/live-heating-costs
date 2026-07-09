@@ -210,6 +210,7 @@
     "fuel_unit": {
       "options": {
         "m3": "Cubic metres (stacked wood)",
+        "m3_loose": "Cubic metres (loose/thrown wood)",
         "kg": "Kilograms",
         "kwh": "kWh (direct)"
       }

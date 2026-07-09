@@ -235,7 +235,7 @@ Copy `custom_components/live_heating_costs` into your Home Assistant
    backfill (default 60).
 2. **Add heat sources**, one at a time, from the integration's page:
    - *Fixed-cost fuel*: fuel unit (m³/kg/kWh), price per unit, energy density
-     (defaults assume stacked birch: 1700 kWh/m³ or 4.1 kWh/kg), combustion
+     (defaults assume birch: 1700 kWh/m³ stacked, 1000 kWh/m³ loose/thrown, 4.1 kWh/kg), combustion
      efficiency, capacity, and optional activity detection — *duration* mode
      integrates an assumed output while a switch/binary_sensor/input_boolean
      is on, *event* mode credits a fixed kWh per debounced off→on transition

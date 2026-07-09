@@ -11,13 +11,14 @@ from homeassistant.components.number import NumberEntity, NumberMode
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
 
-from .const import FUEL_UNIT_KG, FUEL_UNIT_KWH, FUEL_UNIT_M3
+from .const import FUEL_UNIT_KG, FUEL_UNIT_KWH, FUEL_UNIT_M3, FUEL_UNIT_M3_LOOSE
 from .coordinator import LiveHeatingCostsConfigEntry, LiveHeatingCostsCoordinator
 from .entity import LiveHeatingCostsEntity
 from .models import StaticSourceConfig
 
 _FUEL_UNIT_SUFFIX = {
     FUEL_UNIT_M3: "/m³",
+    FUEL_UNIT_M3_LOOSE: "/m³",
     FUEL_UNIT_KG: "/kg",
     FUEL_UNIT_KWH: "/kWh",
 }

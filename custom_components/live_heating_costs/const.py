@@ -79,13 +79,15 @@ DEFAULT_CAPACITY_KW = 10.0
 # static (fuel) sources
 CONF_FUEL_UNIT = "fuel_unit"
 FUEL_UNIT_M3 = "m3"
+FUEL_UNIT_M3_LOOSE = "m3_loose"  # irtokuutio — thrown, not stacked
 FUEL_UNIT_KG = "kg"
 FUEL_UNIT_KWH = "kwh"
-FUEL_UNITS = [FUEL_UNIT_M3, FUEL_UNIT_KG, FUEL_UNIT_KWH]
+FUEL_UNITS = [FUEL_UNIT_M3, FUEL_UNIT_M3_LOOSE, FUEL_UNIT_KG, FUEL_UNIT_KWH]
 CONF_PRICE_PER_UNIT = "price_per_unit_eur"
 CONF_ENERGY_DENSITY = "energy_density_kwh_per_unit"
 CONF_EFFICIENCY = "efficiency"
 DEFAULT_ENERGY_DENSITY_M3 = 1700.0  # stacked birch, kWh/m³
+DEFAULT_ENERGY_DENSITY_M3_LOOSE = 1000.0  # loose (thrown) birch, kWh/m³
 DEFAULT_ENERGY_DENSITY_KG = 4.1  # birch, kWh/kg
 DEFAULT_EFFICIENCY = 0.75
 

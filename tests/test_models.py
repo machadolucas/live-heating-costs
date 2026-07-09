@@ -34,6 +34,7 @@ from custom_components.live_heating_costs.const import (
     DEFAULT_FIXED_COP,
     FUEL_UNIT_KWH,
     FUEL_UNIT_M3,
+    FUEL_UNIT_M3_LOOSE,
     SOURCE_TYPE_CURVE,
     SOURCE_TYPE_DYNAMIC_FIXED,
     SOURCE_TYPE_STATIC,
@@ -322,3 +323,17 @@ def test_dynamic_fixed_optional_energy_entity():
     assert cfg.energy_entity is None
     cfg = source_from_subentry({**base, CONF_ENERGY_ENTITY: "sensor.boiler_energy"})
     assert cfg.energy_entity == "sensor.boiler_energy"
+
+
+def test_static_loose_m3_density_default():
+    cfg = source_from_subentry(
+        {
+            CONF_SOURCE_TYPE: SOURCE_TYPE_STATIC,
+            CONF_NAME: "Wood",
+            CONF_FUEL_UNIT: FUEL_UNIT_M3_LOOSE,
+            CONF_PRICE_PER_UNIT: 80.0,
+        }
+    )
+    assert cfg.energy_density_kwh_per_unit == 1000.0
+    # 80 €/loose m³ at 75 % efficiency → ~10.67 c/kWh delivered
+    assert cfg.cost_eur_per_kwh() == pytest.approx(80.0 / (1000.0 * 0.75))
