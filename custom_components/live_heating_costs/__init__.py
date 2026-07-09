@@ -18,7 +18,7 @@ from homeassistant.helpers import config_validation as cv
 from homeassistant.util import dt as dt_util
 
 from . import history
-from .const import ATTR_ENERGY_KWH, ATTR_SOURCE, ATTR_UNITS, DOMAIN, SERVICE_LOG_WOOD
+from .const import ATTR_ENERGY_KWH, ATTR_SOURCE, ATTR_UNITS, DOMAIN, PLATFORMS, SERVICE_LOG_WOOD
 from .coordinator import LiveHeatingCostsConfigEntry, LiveHeatingCostsCoordinator
 from .models import StaticSourceConfig
 from .persistence import RuntimeStore
@@ -26,12 +26,6 @@ from .persistence import RuntimeStore
 _LOGGER = logging.getLogger(__name__)
 _CARD_FILE = "live-heating-costs-card.js"
 _CARD_URL = f"/{DOMAIN}/{_CARD_FILE}"
-
-# The sensor/binary_sensor/number platforms haven't landed yet (they're built
-# in a later milestone). Forward this empty list for now so setup succeeds
-# without them; the platform agent flips this to `const.PLATFORMS` once those
-# modules exist.
-PLATFORMS_ACTIVE: list[str] = []
 
 
 def _card_version(path: pathlib.Path) -> str:
@@ -237,7 +231,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: LiveHeatingCostsConfigEn
             DOMAIN, SERVICE_LOG_WOOD, _handle_log_wood, schema=LOG_WOOD_SCHEMA
         )
 
-    await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS_ACTIVE)
+    await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
     entry.async_on_unload(entry.add_update_listener(_async_reload_entry))
 
     # UA-learner recorder backfill: best-effort, so it runs as a detached
@@ -251,7 +245,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: LiveHeatingCostsConfigEn
 
 async def async_unload_entry(hass: HomeAssistant, entry: LiveHeatingCostsConfigEntry) -> bool:
     """Unload the hub config entry."""
-    unloaded = await hass.config_entries.async_unload_platforms(entry, PLATFORMS_ACTIVE)
+    unloaded = await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
     if unloaded:
         coordinator = entry.runtime_data
         await coordinator.async_shutdown()

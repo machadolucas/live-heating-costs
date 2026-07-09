@@ -226,5 +226,24 @@
         "custom": "Custom"
       }
     }
+  },
+  "entity": {
+    "sensor": {
+      "heat_cost": { "name": "Heat cost" },
+      "capacity": { "name": "Capacity" },
+      "cop": { "name": "COP" },
+      "cost_forecast": { "name": "Cost forecast" },
+      "cheapest_source": { "name": "Cheapest source" },
+      "heating_demand": { "name": "Heating demand" },
+      "ua_coefficient": { "name": "Heat-loss coefficient" }
+    },
+    "binary_sensor": {
+      "heating": { "name": "Heating" },
+      "active": { "name": "Active" },
+      "demand_covered": { "name": "Demand covered" }
+    },
+    "number": {
+      "fuel_price": { "name": "Fuel price" }
+    }
   }
 }

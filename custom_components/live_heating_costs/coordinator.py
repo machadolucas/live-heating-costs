@@ -796,6 +796,13 @@ class LiveHeatingCostsCoordinator(DataUpdateCoordinator[HubData]):
     # ------------------------------------------------------------------ #
 
     @callback
+    def async_set_fuel_price_override(self, subentry_id: str, price_per_unit_eur: float) -> None:
+        """Persist a per-source fuel-price override and recompute immediately."""
+        self.fuel_price_overrides[subentry_id] = price_per_unit_eur
+        self.store.schedule_save(self.store_snapshot())
+        self.async_set_updated_data(self.build_hub_data())
+
+    @callback
     def _handle_daily_capture(self, _now: datetime) -> None:
         self.config_entry.async_create_task(
             self.hass, self._async_daily_capture(), "live_heating_costs_daily_capture"
