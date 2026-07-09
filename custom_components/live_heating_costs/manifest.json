@@ -1,10 +1,10 @@
 {
   "domain": "live_heating_costs",
   "name": "Live Heating Costs",
-  "after_dependencies": ["recorder"],
+  "after_dependencies": ["lovelace", "recorder"],
   "codeowners": ["@machadolucas"],
   "config_flow": true,
-  "dependencies": [],
+  "dependencies": ["http"],
   "documentation": "https://github.com/machadolucas/live-heating-costs",
   "integration_type": "hub",
   "iot_class": "calculated",
