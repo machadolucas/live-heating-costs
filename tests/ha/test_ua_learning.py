@@ -64,7 +64,6 @@ async def test_daily_capture_ingests_row_and_resets_accumulator(hass: HomeAssist
     coordinator.day_accum.delivered_kwh = 40.0
     coordinator.day_accum.electricity_kwh = 40.0
     coordinator.day_accum.wood_kwh = 5.0
-    old_date = coordinator.day_accum.date
 
     await _tick(hass, 25 * 3600)  # force past the next 00:05 local daily-capture
 
@@ -73,7 +72,6 @@ async def test_daily_capture_ingests_row_and_resets_accumulator(hass: HomeAssist
     assert coordinator.day_accum.delivered_kwh == 0.0
     assert coordinator.day_accum.wood_kwh == 0.0
     assert coordinator.day_accum.date == dt_util.now().date().isoformat()
-    assert coordinator.day_accum.date == old_date or True  # date may be unchanged in fast tests
 
 
 async def test_log_wood_service_energy_kwh_and_units(hass: HomeAssistant) -> None:

@@ -1,0 +1,19 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256">
+  <!-- Live Heating Costs — flame + cost tag. Render PNGs with:
+       rsvg-convert -w 256 -h 256 icon.svg > icon.png
+       rsvg-convert -w 512 -h 512 icon.svg > icon@2x.png -->
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#f6a13c"/>
+      <stop offset="1" stop-color="#e2571f"/>
+    </linearGradient>
+  </defs>
+  <rect width="256" height="256" rx="56" fill="url(#bg)"/>
+  <!-- flame -->
+  <path d="M128 44c6 26-14 38-24 56-9 16-12 34-2 52 4-12 10-18 18-24-2 22 8 30 18 40 3-14 10-19 17-26 8-8 13-20 10-34 12 8 19 20 20 34 14-18 16-44 4-64-13-22-40-34-61-34z"
+        fill="#fff8ef" opacity="0.96"/>
+  <!-- euro badge -->
+  <circle cx="176" cy="180" r="46" fill="#1f2430"/>
+  <text x="176" y="198" font-family="Arial, Helvetica, sans-serif" font-size="56"
+        font-weight="bold" text-anchor="middle" fill="#ffd76e">€</text>
+</svg>
