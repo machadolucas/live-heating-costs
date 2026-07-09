@@ -112,8 +112,11 @@ above.
 
 ## Sizing
 
-The card declares grid options (`getGridOptions`) for Sections dashboards:
-4 rows / 12 columns by default, resizable down to 3 rows / 6 columns.
+The card declares grid options (`getGridOptions`) for Sections dashboards
+with **`rows: "auto"`** so it sizes to its content — the Now view (one row
+per source) and the Forecast view (a fixed-height strip) differ in height and
+the user toggles between them at runtime, so a fixed row count would clip or
+overflow one of them. Width defaults to 12 columns, resizable down to 6.
 
 ## Data contract
 

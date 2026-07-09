@@ -182,13 +182,21 @@ class LiveHeatingCostsCard extends HTMLElement {
   }
 
   getCardSize() {
-    return 4;
+    // Masonry fallback: estimate height units from the current content
+    // (header + demand/mix line + one per ranked source + an excluded line).
+    const id = this._hass ? this._mainEntityId() : null;
+    const a = (id && this._hass.states[id] && this._hass.states[id].attributes) || {};
+    const rank = Array.isArray(a.ranking) ? a.ranking.length : 5;
+    const excl = Array.isArray(a.excluded) && a.excluded.length ? 1 : 0;
+    return 2 + rank + excl;
   }
 
-  // Sections (grid) dashboards: compact by default, resizable down to half
-  // width / three rows, up to a full-width panel.
+  // Sections (grid) dashboards: size to content. The Now view (one row per
+  // source) and the Forecast view (fixed-height strip) have very different
+  // heights, and the user toggles between them at runtime — a fixed `rows`
+  // would clip/overflow one of them, so let the grid measure actual content.
   getGridOptions() {
-    return { rows: 4, min_rows: 3, columns: 12, min_columns: 6 };
+    return { rows: "auto", columns: 12, min_columns: 6 };
   }
 
   static getConfigElement() {
