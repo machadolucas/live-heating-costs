@@ -101,7 +101,11 @@ def wood_subentry(
 
 
 def resistive_subentry(
-    *, title: str = "Resistive", capacity_kw: float = 9.0, cop: float = 1.0
+    *,
+    title: str = "Resistive",
+    capacity_kw: float = 9.0,
+    cop: float = 1.0,
+    energy_entity: str | None = None,
 ) -> ConfigSubentryData:
     """A dynamic_fixed (resistive) electric source subentry."""
     data = {
@@ -110,6 +114,8 @@ def resistive_subentry(
         CONF_CAPACITY_KW: capacity_kw,
         CONF_COP: cop,
     }
+    if energy_entity:
+        data[CONF_ENERGY_ENTITY] = energy_entity
     return ConfigSubentryData(
         subentry_type=SUBENTRY_TYPE_SOURCE, title=title, unique_id=None, data=data
     )

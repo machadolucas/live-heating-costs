@@ -199,3 +199,29 @@ async def test_event_mode_debounces_double_transition(hass: HomeAssistant) -> No
 
     assert coordinator.day_accum.wood_kwh == pytest.approx(2.0)
     assert len(coordinator.wood_log) == 1
+
+
+async def test_dynamic_fixed_energy_meter_feeds_day_accumulator(hass: HomeAssistant) -> None:
+    """A resistive source with an optional kWh counter contributes delivered heat."""
+    hass.states.async_set("sensor.buy_price", "0.10")
+    hass.states.async_set("sensor.outdoor_temp", "-5.0")
+    hass.states.async_set("sensor.resistive_energy", "100.0")
+    entry = await async_setup_hub(
+        hass,
+        [resistive_subentry(cop=1.0, energy_entity="sensor.resistive_energy")],
+    )
+    coordinator = entry.runtime_data
+
+    await _tick(hass, SAMPLE_INTERVAL_S + 5)  # seeds last_energy_counters
+    hass.states.async_set("sensor.resistive_energy", "101.5")
+    await _tick(hass, SAMPLE_INTERVAL_S + 5)
+
+    assert coordinator.day_accum.electricity_kwh == pytest.approx(1.5)
+    assert coordinator.day_accum.delivered_kwh == pytest.approx(1.5)  # COP 1.0
+    sub_id = next(iter(coordinator.sources))
+    assert coordinator.day_accum.per_source_kwh[sub_id] == pytest.approx(1.5)
+
+    # Counter reset must not poison the accumulator.
+    hass.states.async_set("sensor.resistive_energy", "0.5")
+    await _tick(hass, SAMPLE_INTERVAL_S + 5)
+    assert coordinator.day_accum.electricity_kwh == pytest.approx(1.5)

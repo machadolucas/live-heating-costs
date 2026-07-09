@@ -230,11 +230,17 @@ def _static_from_subentry(data: Mapping) -> StaticSourceConfig:
 
 @dataclass(frozen=True)
 class DynamicFixedConfig:
-    """An electric source with a fixed COP (resistive heating = 1.0)."""
+    """An electric source with a fixed COP (resistive heating = 1.0).
+
+    ``energy_entity`` (optional) is a cumulative kWh counter for the source;
+    when set, its consumption feeds the day accumulator and the UA learner
+    (delivered heat = energy × COP), same as a heat pump's Shelly counter.
+    """
 
     name: str
     capacity_kw: float
     cop: float
+    energy_entity: str | None = None
 
 
 def _dynamic_fixed_from_subentry(data: Mapping) -> DynamicFixedConfig:
@@ -243,7 +249,12 @@ def _dynamic_fixed_from_subentry(data: Mapping) -> DynamicFixedConfig:
     cop = float(data.get(CONF_COP, DEFAULT_FIXED_COP))
     if cop <= 0:
         raise ConfigError(CONF_COP, "cop must be > 0")
-    return DynamicFixedConfig(name=name, capacity_kw=capacity_kw, cop=cop)
+    return DynamicFixedConfig(
+        name=name,
+        capacity_kw=capacity_kw,
+        cop=cop,
+        energy_entity=data.get(CONF_ENERGY_ENTITY) or None,
+    )
 
 
 # --------------------------------------------------------------------------- #

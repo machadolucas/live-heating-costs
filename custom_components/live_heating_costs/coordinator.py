@@ -554,9 +554,15 @@ class LiveHeatingCostsCoordinator(DataUpdateCoordinator[HubData]):
     # Sampling tick / day accumulator
     # ------------------------------------------------------------------ #
 
-    def _accumulate_curve_energy(
-        self, subentry_id: str, cfg: CurveSourceConfig, energy_kwh: float | None
+    def _accumulate_metered_energy(
+        self, subentry_id: str, energy_kwh: float | None, cop: float | None
     ) -> None:
+        """Fold a cumulative counter reading into the day accumulator.
+
+        ``cop`` converts the electricity delta into delivered heat (blended
+        COP for curve sources, the fixed COP for dynamic_fixed ones); with an
+        unknown COP the electricity still counts but no heat is credited.
+        """
         if energy_kwh is None:
             return
         last = self.day_accum.last_energy_counters.get(subentry_id)
@@ -567,7 +573,6 @@ class LiveHeatingCostsCoordinator(DataUpdateCoordinator[HubData]):
         if delta_e <= 0:
             return  # counter reset or no movement — nothing to fold in
         self.day_accum.electricity_kwh += delta_e
-        cop = self._eval_curve(subentry_id, cfg).cop
         if cop is not None and cop > 0:
             delivered = delta_e * cop
             self.day_accum.delivered_kwh += delivered
@@ -618,7 +623,14 @@ class LiveHeatingCostsCoordinator(DataUpdateCoordinator[HubData]):
                         hvac_action=hvac_action,
                     )
                 )
-                self._accumulate_curve_energy(subentry_id, cfg, energy_kwh)
+                self._accumulate_metered_energy(
+                    subentry_id, energy_kwh, self._eval_curve(subentry_id, cfg).cop
+                )
+            elif isinstance(cfg, DynamicFixedConfig):
+                if cfg.energy_entity:
+                    self._accumulate_metered_energy(
+                        subentry_id, self._float(cfg.energy_entity), cfg.cop
+                    )
             elif isinstance(cfg, StaticSourceConfig):
                 self._accumulate_static_duration(subentry_id, cfg)
 

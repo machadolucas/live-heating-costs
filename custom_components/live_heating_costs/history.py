@@ -2,9 +2,9 @@
 
 Best-effort, background-task only: called once from ``async_setup_entry``
 after the first refresh, and entirely wrapped so a missing/partial recorder
-never breaks setup. Only curve sources are backfilled here — they are the
-only source type with a metered ``energy_entity`` in this build (see the
-``models.DynamicFixedConfig`` deviation noted in the coordinator/tests);
+never breaks setup. Metered sources are backfilled: curve sources (delivered
+heat = daily energy × modeled COP at the day's mean temperature) and
+dynamic_fixed sources with an optional ``energy_entity`` (× their fixed COP);
 static (wood) sources have no recorder history to mine.
 """
 
@@ -19,7 +19,7 @@ from homeassistant.util import dt as dt_util
 
 from . import ua_learner
 from .const import DEMAND_MODE_INTERNAL
-from .models import CurveSourceConfig
+from .models import CurveSourceConfig, DynamicFixedConfig
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -55,12 +55,13 @@ async def async_backfill(hass: HomeAssistant, coordinator) -> int:
     if not coordinator._outdoor_temp_entity:
         return 0
 
-    curve_sources: dict[str, CurveSourceConfig] = {
+    metered_sources: dict[str, CurveSourceConfig | DynamicFixedConfig] = {
         sub_id: cfg
         for sub_id, cfg in coordinator.sources.items()
         if isinstance(cfg, CurveSourceConfig)
+        or (isinstance(cfg, DynamicFixedConfig) and cfg.energy_entity)
     }
-    if not curve_sources:
+    if not metered_sources:
         return 0
 
     end = dt_util.utcnow()
@@ -83,7 +84,7 @@ async def async_backfill(hass: HomeAssistant, coordinator) -> int:
             hass,
             start,
             end,
-            {cfg.energy_entity for cfg in curve_sources.values()},
+            {cfg.energy_entity for cfg in metered_sources.values()},
             "day",
             None,
             {"change"},
@@ -107,13 +108,16 @@ async def async_backfill(hass: HomeAssistant, coordinator) -> int:
 
     delivered_by_day: dict[str, float] = defaultdict(float)
     electricity_by_day: dict[str, float] = defaultdict(float)
-    for cfg in curve_sources.values():
+    for cfg in metered_sources.values():
         for row in energy_stats.get(cfg.energy_entity, []):
             change = row.get("change")
             if change is None or change < 0:
                 continue
             day = _day_key(row["start"])
             electricity_by_day[day] += change
+            if isinstance(cfg, DynamicFixedConfig):
+                delivered_by_day[day] += change * cfg.cop
+                continue
             n = temp_n_by_day.get(day, 0)
             if n == 0:
                 continue  # no temperature that day -> can't model a COP

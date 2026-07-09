@@ -322,7 +322,7 @@ _STATIC_FIELDS = {
     CONF_ENERGY_PER_EVENT_KWH,
     CONF_EVENT_DEBOUNCE_HOURS,
 }
-_DYNAMIC_FIXED_FIELDS = {CONF_NAME, CONF_COP, CONF_CAPACITY_KW}
+_DYNAMIC_FIXED_FIELDS = {CONF_NAME, CONF_COP, CONF_CAPACITY_KW, CONF_ENERGY_ENTITY}
 _CURVE_TABLES_FIELDS = {
     CONF_PRESET,
     CONF_COP_POINTS,
@@ -447,6 +447,9 @@ def _dynamic_fixed_schema(defaults: dict, include_name: bool) -> vol.Schema:
                     min=0, max=100, step=0.1, unit_of_measurement="kW", mode=_BOX
                 )
             ),
+            vol.Optional(
+                CONF_ENERGY_ENTITY, description=suggest(CONF_ENERGY_ENTITY)
+            ): _sensor_selector(device_class="energy"),
         }
     )
     return vol.Schema(schema)

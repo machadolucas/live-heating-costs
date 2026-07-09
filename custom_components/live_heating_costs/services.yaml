@@ -1,14 +1,6 @@
 log_wood:
-  name: Log wood heat
-  description: >-
-    Manually log delivered heat from a wood/fuel source, either as a direct
-    kWh figure or as a fuel-unit count (converted using the source's
-    configured energy density and efficiency). Specify exactly one of
-    energy_kwh or units.
   fields:
     energy_kwh:
-      name: Energy
-      description: Delivered heat energy, in kWh.
       example: 12.5
       selector:
         number:
@@ -17,10 +9,6 @@ log_wood:
           mode: box
           unit_of_measurement: kWh
     units:
-      name: Fuel units
-      description: >-
-        Fuel quantity consumed, in the source's configured fuel unit
-        (m³, kg or kWh).
       example: 0.05
       selector:
         number:
@@ -28,10 +16,6 @@ log_wood:
           step: 0.01
           mode: box
     source:
-      name: Source
-      description: >-
-        Title or subentry ID of the static (wood) source to log against.
-        Defaults to the first configured static source.
       example: "Wood stove"
       selector:
         text:

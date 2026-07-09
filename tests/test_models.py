@@ -314,3 +314,11 @@ def test_source_from_subentry_unknown_type_raises():
     with pytest.raises(ConfigError) as exc_info:
         source_from_subentry({CONF_SOURCE_TYPE: "not_a_type", CONF_NAME: "X"})
     assert exc_info.value.field == CONF_SOURCE_TYPE
+
+
+def test_dynamic_fixed_optional_energy_entity():
+    base = {CONF_SOURCE_TYPE: SOURCE_TYPE_DYNAMIC_FIXED, CONF_NAME: "Resistive"}
+    cfg = source_from_subentry(base)
+    assert cfg.energy_entity is None
+    cfg = source_from_subentry({**base, CONF_ENERGY_ENTITY: "sensor.boiler_energy"})
+    assert cfg.energy_entity == "sensor.boiler_energy"
