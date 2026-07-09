@@ -1,0 +1,230 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Live Heating Costs",
+        "description": "Set up the hub that all heat sources will share: the live buy price, optional day-ahead/forecast price sensors, and the house's outdoor-temperature and demand model. Heat sources (wood stove, resistive element, heat pump, …) are added afterwards from the integration's page.",
+        "data": {
+          "name": "Name",
+          "buy_price_entity": "Live buy-price sensor",
+          "day_ahead_entity": "Day-ahead price sensor (optional)",
+          "forecast_price_entity": "Beyond-tomorrow price-forecast sensor (optional)",
+          "weather_entity": "Weather entity (optional)",
+          "outdoor_temp_entity": "Outdoor-temperature sensor",
+          "demand_mode": "Heat-demand source"
+        },
+        "data_description": {
+          "buy_price_entity": "Your all-in live electricity buy price in EUR/kWh (e.g. sensor.nordpool_total_buying_cost). Used to compute the live cost of every heat source right now.",
+          "day_ahead_entity": "A sensor exposing today/tomorrow price slots in its attributes (e.g. Nord Pool, ENTSO-e, or a day-ahead template). Used to show the cost trend for the next slots.",
+          "forecast_price_entity": "A predictor sensor estimating prices beyond the real day-ahead horizon. Used only for slots later than the known prices.",
+          "weather_entity": "A weather entity whose forecast can stand in for the outdoor-temperature sensor when it's briefly unavailable.",
+          "outdoor_temp_entity": "The outdoor-temperature sensor used to look up heat-pump COP/capacity and to drive the internal heat-demand model.",
+          "demand_mode": "How much heat the house needs right now: measured from an existing sensor, or estimated from outdoor temperature with a heat-loss model."
+        }
+      },
+      "reconfigure": {
+        "title": "Live Heating Costs",
+        "description": "Update the shared price, weather, and temperature sources.",
+        "data": {
+          "name": "Name",
+          "buy_price_entity": "Live buy-price sensor",
+          "day_ahead_entity": "Day-ahead price sensor (optional)",
+          "forecast_price_entity": "Beyond-tomorrow price-forecast sensor (optional)",
+          "weather_entity": "Weather entity (optional)",
+          "outdoor_temp_entity": "Outdoor-temperature sensor",
+          "demand_mode": "Heat-demand source"
+        },
+        "data_description": {
+          "buy_price_entity": "Your all-in live electricity buy price in EUR/kWh (e.g. sensor.nordpool_total_buying_cost). Used to compute the live cost of every heat source right now.",
+          "day_ahead_entity": "A sensor exposing today/tomorrow price slots in its attributes (e.g. Nord Pool, ENTSO-e, or a day-ahead template). Used to show the cost trend for the next slots.",
+          "forecast_price_entity": "A predictor sensor estimating prices beyond the real day-ahead horizon. Used only for slots later than the known prices.",
+          "weather_entity": "A weather entity whose forecast can stand in for the outdoor-temperature sensor when it's briefly unavailable.",
+          "outdoor_temp_entity": "The outdoor-temperature sensor used to look up heat-pump COP/capacity and to drive the internal heat-demand model.",
+          "demand_mode": "How much heat the house needs right now: measured from an existing sensor, or estimated from outdoor temperature with a heat-loss model."
+        }
+      },
+      "demand": {
+        "title": "Heat demand",
+        "description": "Configure how live heat demand (kW) is determined.",
+        "data": {
+          "demand_entity": "Heat-demand sensor",
+          "demand_unit": "Demand sensor unit",
+          "base_temp": "Balance-point temperature",
+          "ua_seed_w_per_c": "Starting heat-loss coefficient (UA)",
+          "ua_learning": "Learn UA from measured heating history",
+          "backfill_days": "Backfill history (days)"
+        },
+        "data_description": {
+          "demand_entity": "A sensor that already reports how much heat the house needs (kW or kWh/day).",
+          "demand_unit": "Whether the demand sensor reports instantaneous power (kW) or a daily energy total (kWh/day).",
+          "base_temp": "The outdoor temperature above which the house needs no heating (its 'balance point'). Demand is modelled as UA × max(0, base_temp − outdoor_temp).",
+          "ua_seed_w_per_c": "House heat-loss coefficient. 140 W/°C reproduces the legacy heating-demand constant; it will be refined automatically when learning is on.",
+          "ua_learning": "When on, the seed UA above is continuously refined from measured delivered heat vs. outdoor temperature, so the model improves over time instead of staying fixed at the seed.",
+          "backfill_days": "How many days of history to replay on first start to warm up the UA learner immediately, instead of waiting for that many days of live data."
+        }
+      }
+    },
+    "error": {
+      "buy_price_not_numeric": "That sensor's state isn't a plain number (EUR/kWh). Point this at a live buy-price sensor.",
+      "invalid_price_format": "That sensor doesn't expose a recognised price forecast (no today/tomorrow price list found in its attributes)."
+    },
+    "abort": {
+      "already_configured": "This buy-price sensor is already configured.",
+      "reconfigure_successful": "Sources updated."
+    }
+  },
+  "config_subentries": {
+    "source": {
+      "initiate_flow": {
+        "user": "Add heat source",
+        "reconfigure": "Reconfigure heat source"
+      },
+      "entry_type": "Heat source",
+      "step": {
+        "init": {
+          "title": "Add a heat source",
+          "description": "Name the source and pick how it's modelled. The type can't be changed later — delete and re-add the source to switch types.",
+          "data": {
+            "name": "Name",
+            "source_type": "Source type"
+          },
+          "data_description": {
+            "source_type": "Curve = a heat pump with a measured/published COP(T) and capacity(T) table. Dynamic, fixed COP = an electric source whose efficiency doesn't depend on temperature (resistive heating = COP 1.0). Fixed-cost fuel = wood or another fuel priced per unit, independent of the live electricity price."
+          }
+        },
+        "static": {
+          "title": "Fixed-cost fuel source",
+          "description": "A fuel-derived heat source (e.g. a wood stove) priced independently of the live electricity price. Capacity 0 means the source contributes heat (and is used for UA learning) but is never dispatched/controlled — useful for a wood sauna whose heat reaches the house only via heat-recovery ventilation. Event mode suits exactly that: a fixed kWh is credited each time the sauna switches on, debounced so a single burn isn't counted twice.",
+          "data": {
+            "name": "Name",
+            "fuel_unit": "Fuel unit",
+            "price_per_unit_eur": "Price per unit (€)",
+            "energy_density_kwh_per_unit": "Energy density (kWh per unit)",
+            "efficiency": "Combustion/delivery efficiency",
+            "capacity_kw": "Rated capacity (kW)",
+            "activity_mode": "Activity detection",
+            "activity_entity": "Activity sensor (optional)",
+            "active_output_kw": "Output while active (kW)",
+            "energy_per_event_kwh": "Energy per event (kWh)",
+            "event_debounce_hours": "Event debounce (hours)"
+          },
+          "data_description": {
+            "fuel_unit": "The unit the price is quoted per: cubic metres of stacked wood, kilograms, or kWh directly.",
+            "price_per_unit_eur": "What you pay per unit of fuel, in euro.",
+            "energy_density_kwh_per_unit": "Energy content of one unit of fuel. Suggested default is 1700 kWh/m³ for stacked birch — adjust for your wood/fuel and unit.",
+            "efficiency": "Fraction of the fuel's energy that ends up as delivered heat (stove + flue losses).",
+            "capacity_kw": "Maximum heat output. Set to 0 for a source that contributes heat but is never dispatched (e.g. a wood sauna) — it's still counted for cost/UA learning.",
+            "activity_mode": "None = no on/off detection (a constant background contributor). Duration = integrate a known output while the activity sensor is on. Event = credit a fixed amount of energy each time the activity sensor switches on, useful for a sauna heated in distinct sessions.",
+            "activity_entity": "The switch/binary_sensor/input_boolean that reports when this source is actively producing heat.",
+            "active_output_kw": "Assumed heat output while the activity sensor is on (duration mode).",
+            "energy_per_event_kwh": "Fixed heat delivered per activation, e.g. one sauna heating session (event mode).",
+            "event_debounce_hours": "Minimum gap between two activations for them to count as separate events, so a single long burn with brief interruptions isn't double-counted."
+          }
+        },
+        "dynamic_fixed": {
+          "title": "Electric, fixed COP",
+          "description": "An electric heat source whose efficiency doesn't vary with outdoor temperature — resistive heating (COP 1.0) or any electric source with a known constant COP.",
+          "data": {
+            "name": "Name",
+            "cop": "Fixed COP",
+            "capacity_kw": "Rated capacity (kW)"
+          },
+          "data_description": {
+            "cop": "Heat output ÷ electricity input, assumed constant regardless of outdoor temperature. Use 1.0 for pure resistive heating.",
+            "capacity_kw": "Maximum heat output."
+          }
+        },
+        "curve_entities": {
+          "title": "Heat pump (COP curve) — sensors",
+          "description": "The live sensors this heat pump reports. COP/capacity tables are configured on the next step.",
+          "data": {
+            "name": "Name",
+            "power_entity": "Electrical power sensor",
+            "energy_entity": "Cumulative energy sensor",
+            "climate_entity": "Climate entity (optional)",
+            "pump_temp_entity": "Pump-reported outdoor temperature (optional)",
+            "temp_entity_override": "Outdoor-temperature override (optional)",
+            "standby_w": "Standby power (W)",
+            "blend_window_min": "COP blend window (minutes)"
+          },
+          "data_description": {
+            "power_entity": "The pump's live electrical power draw (W). Used to detect when it's actively heating.",
+            "energy_entity": "A cumulative (total_increasing) energy counter (kWh) for the pump, used to compute delivered heat via COP over a window.",
+            "climate_entity": "Optional climate entity whose hvac_action gates 'heating' state, tightening when the COP/capacity tables apply.",
+            "pump_temp_entity": "If the pump reports its own outdoor-temperature reading, prefer it over the hub's outdoor-temperature sensor for this source's COP lookup.",
+            "temp_entity_override": "Use a different outdoor-temperature sensor for just this source instead of the hub's.",
+            "standby_w": "Power below which the pump is considered idle (not heating), rather than running at very low output.",
+            "blend_window_min": "Window used to smooth the live power/energy signal into a stable COP estimate."
+          }
+        },
+        "curve_tables": {
+          "title": "Heat pump (COP curve) — tables",
+          "description": "Pick a built-in pump preset, or choose 'Custom' and paste your own COP(T) and capacity(T) tables as 'temp:value' pairs (e.g. '-30:1.35, -25:1.6, 7:4.2') or a JSON list of [temp, value] pairs. Changing the preset dropdown refreshes the tables below with that preset's values instead of saving immediately — submit again to confirm.",
+          "data": {
+            "preset": "Pump preset",
+            "cop_points": "COP(T) table",
+            "capacity_points": "Capacity(T) table",
+            "operating_limit_c": "Minimum operating temperature (°C)",
+            "min_cop": "Minimum plausible COP",
+            "max_cop": "Maximum plausible COP"
+          },
+          "data_description": {
+            "preset": "A built-in measured/published table for a known pump, or 'Custom' to enter your own.",
+            "cop_points": "COP at each outdoor temperature, interpolated linearly between points and clamped flat beyond the endpoints. Ignored (and replaced) unless the preset is 'Custom'.",
+            "capacity_points": "Maximum heat output (kW) at each outdoor temperature, same format as the COP table. Ignored (and replaced) unless the preset is 'Custom'.",
+            "operating_limit_c": "Below this outdoor temperature the pump can't operate at all.",
+            "min_cop": "Sanity floor: a computed COP below this is treated as implausible/unavailable rather than reported.",
+            "max_cop": "Sanity ceiling: a computed COP above this is treated as implausible/unavailable rather than reported."
+          }
+        }
+      },
+      "error": {
+        "invalid_config": "{error}",
+        "invalid_curve_format": "Couldn't parse that table. Use 'temp:value' pairs separated by commas or newlines (e.g. '-30:1.35, 7:4.2'), or a JSON list of [temp, value] pairs.",
+        "invalid_curve_points": "That table isn't valid: it needs at least 2 points, no duplicate temperatures, and all values greater than 0."
+      }
+    }
+  },
+  "selector": {
+    "demand_mode": {
+      "options": {
+        "internal_model": "Estimate from outdoor temperature (internal model)",
+        "external_entity": "Measure from an existing sensor"
+      }
+    },
+    "demand_unit": {
+      "options": {
+        "kw": "Kilowatts (kW)",
+        "kwh_per_day": "Kilowatt-hours per day (kWh/day)"
+      }
+    },
+    "source_type": {
+      "options": {
+        "curve": "Heat pump (COP curve)",
+        "dynamic_fixed": "Electric, fixed COP",
+        "static": "Fixed-cost fuel (wood)"
+      }
+    },
+    "fuel_unit": {
+      "options": {
+        "m3": "Cubic metres (stacked wood)",
+        "kg": "Kilograms",
+        "kwh": "kWh (direct)"
+      }
+    },
+    "activity_mode": {
+      "options": {
+        "none": "None (always-on contributor)",
+        "duration": "Duration (integrate output while active)",
+        "event": "Event (fixed energy per activation)"
+      }
+    },
+    "preset": {
+      "options": {
+        "msz_fd25va": "Mitsubishi MSZ-FD25VA (measured, VTT)",
+        "msz_rw35vg": "Mitsubishi MSZ-RW35VG (EN 14825)",
+        "custom": "Custom"
+      }
+    }
+  }
+}
