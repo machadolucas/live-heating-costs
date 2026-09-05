@@ -3,7 +3,9 @@
 If a field here is renamed without updating
 ``custom_components/live_heating_costs/frontend/live-heating-costs-card.js``
 (and ``docs/card.md``), the card silently breaks — this test exists to catch
-that at the integration layer before it ships.
+that at the integration layer before it ships. That includes the entity ids
+the card uses to open more-info dialogs and the per-slot ``partial`` flag it
+renders as an incomplete comparison.
 """
 
 from __future__ import annotations
@@ -32,6 +34,7 @@ _RANKING_KEYS = {
     "active",
     "heating",
     "measured_blend",
+    "entity_id",
 }
 _MAIN_KEYS = {
     "integration",
@@ -42,8 +45,10 @@ _MAIN_KEYS = {
     "shortfall_kw",
     "blended_cost_c_per_kwh",
     "buy_price_c_per_kwh",
+    "demand_entity_id",
 }
 _FORECAST_KEYS = {"integration", "slots", "names", "horizon_end", "has_tomorrow"}
+_FORECAST_SLOT_KEYS = {"start", "end", "costs", "cheapest", "estimated", "partial"}
 
 
 async def _tick(hass: HomeAssistant, seconds: float) -> None:
@@ -95,7 +100,16 @@ async def test_cheapest_source_attribute_contract(hass: HomeAssistant) -> None:
         assert set(row.keys()) == _RANKING_KEYS
 
     for row in attrs["excluded"]:
-        assert set(row.keys()) == {"name", "reason"}
+        assert set(row.keys()) == {"name", "reason", "entity_id"}
+
+    # The card opens more-info dialogs from these, so they must be real entities.
+    for row in ranking:
+        assert row["entity_id"].startswith("sensor.")
+        assert hass.states.get(row["entity_id"]) is not None
+
+    demand_entity_id = attrs["demand_entity_id"]
+    assert demand_entity_id.startswith("sensor.")
+    assert hass.states.get(demand_entity_id) is not None
 
     # Ranked ascending by cost.
     costs = [row["cost_c_per_kwh"] for row in ranking]
@@ -124,3 +138,6 @@ async def test_hub_cost_forecast_attribute_contract(hass: HomeAssistant) -> None
     assert attrs["integration"] == DOMAIN
     assert isinstance(attrs["slots"], list)
     assert isinstance(attrs["names"], dict)
+    for slot in attrs["slots"]:
+        assert set(slot.keys()) == _FORECAST_SLOT_KEYS
+        assert isinstance(slot["partial"], bool)

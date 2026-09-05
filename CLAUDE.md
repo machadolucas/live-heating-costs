@@ -2,10 +2,10 @@
 
 Working notes for AI agents and future-me. Read this before changing code.
 
-**Status:** pre-release (`manifest.json` at `0.1.0`, no tags cut yet). All
-features described here are implemented and covered by tests — run them (see
-Dev workflow) before trusting a change. See `docs/architecture.md` for the
-module map and data flow.
+**Status:** pre-release (`manifest.json` at `0.2.0`, "card clarity +
+compactness" — no tags cut yet). All features described here are implemented
+and covered by tests — run them (see Dev workflow) before trusting a change.
+See `docs/architecture.md` for the module map and data flow.
 
 ## What this is
 
@@ -75,6 +75,36 @@ to make that bug structurally impossible — see the engine contract below.
   modeled COP (clamped) whenever there's no usable measurement, and blends
   proportional to `heating_fraction` when there is. No modeled COP (below the
   operating limit) means no answer at all, regardless of measurement.
+- **Forecast temperature anchoring** (`forecast.anchor_temps`): the hourly
+  weather forecast's first point is the *next* full hour, and `interp_temp`
+  rightly refuses to extrapolate before it — so every curve source used to
+  drop out of the leading slots and `combined_slots` crowned a resistive
+  source "cheapest" for the current hour. `anchor_temps` prepends the
+  *measured* outdoor temperature as a `now` point (a real reading, not an
+  extrapolation) so those slots interpolate normally instead; wired in
+  `coordinator.async_rebuild_forecast`, a no-op when the series already
+  covers `now` or no current reading is available.
+- **Static sources in the combined forecast** (`forecast.combined_slots(...,
+  static_costs=...)`): wood/sauna have no per-slot forecast of their own (flat
+  cost, no weather dependence), but leaving them out of the union meant a
+  cheap fuel source could never win the forecast band even when it plainly
+  beat every electric source all day. `static_costs` folds them in as
+  `{subentry_id: (cost_eur_per_kwh, capacity_kw)}`, same eligibility as a
+  dynamic source (known cost, nonzero capacity — a 0 kW static source is
+  never "cheapest"). Each slot also gets `partial: bool`: true when a source
+  that *does* have slots elsewhere is missing at this boundary (e.g. a heat
+  pump before the weather forecast starts) — `cheapest` is still computed
+  from what's known, but the card draws that slot as an honest "don't know"
+  rather than implying the missing source was priced out. A fuel-price
+  override edit now also triggers an immediate forecast rebuild (previously
+  it waited for the next 15-min tick), since the static line depends on it.
+- **Entity-id attributes, never parsed client-side**: `sensor.py` resolves
+  each row's own sensor's entity id from the entity registry (unique id
+  `{subentry_id}_heat_cost`, `{entry_id}_heating_demand`) and publishes it as
+  `entity_id` on every `ranking`/`excluded` row and as the top-level
+  `demand_entity_id`. The card only ever receives a ready-made entity id —
+  it never derives one from a name or subentry id — and opens it via a
+  `hass-more-info` event.
 
 ## UA learner contract (`ua_learner.py`, tuned in `const.py`)
 
@@ -146,9 +176,12 @@ modules HA-free; if a change needs `hass`, it belongs in `tests/ha/` instead.
   dicts.
 - The card's attribute contract (`CheapestSourceSensor` and
   `HubCostForecastSensor`'s `extra_state_attributes`) is locked by
-  `tests/ha/test_card_state.py` — it asserts the exact key sets. **Change the
-  sensor and the card and this test together**, and update `docs/card.md`'s
-  data contract section too.
+  `tests/ha/test_card_state.py` — it asserts the exact key sets, including
+  each ranking/excluded row's `entity_id`, the top-level `demand_entity_id`,
+  and each forecast slot's `partial` flag (and that resolved entity ids are
+  real, registered entities, not just present). **Change the sensor and the
+  card and this test together**, and update `docs/card.md`'s data contract
+  section too.
 
 ## Releasing
 

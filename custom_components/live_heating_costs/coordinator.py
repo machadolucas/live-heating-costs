@@ -759,8 +759,13 @@ class LiveHeatingCostsCoordinator(DataUpdateCoordinator[HubData]):
         price_slots = self._safe_price_slots(self._day_ahead_entity)
         est_slots = self._safe_price_slots(self._forecast_price_entity)
         temps = await self._async_weather_temps()
+        # The hourly forecast's first point is the *next* full hour; anchoring
+        # it with the measured outdoor temperature keeps curve sources priced
+        # from now on instead of dropping out of the leading slots.
+        temps = forecast_mod.anchor_temps(temps, now, self._float(self._outdoor_temp_entity))
 
         forecast: dict[str, list[SourceSlotCost]] = {}
+        static_costs: dict[str, tuple[float | None, float]] = {}
         for subentry_id, cfg in self.sources.items():
             if isinstance(cfg, CurveSourceConfig):
                 forecast[subentry_id] = forecast_mod.build_source_forecast(
@@ -788,11 +793,18 @@ class LiveHeatingCostsCoordinator(DataUpdateCoordinator[HubData]):
                     fixed_capacity_kw=cfg.capacity_kw,
                     operating_limit_c=None,
                 )
-            # static sources are constant-cost; the card reads that from the
-            # snapshot directly, no forecast needed.
+            elif isinstance(cfg, StaticSourceConfig):
+                # Constant cost, no weather/price dependence -> no per-slot
+                # forecast (and no SourceCostForecastSensor). It's still folded
+                # into the combined slots below as a flat line, so a cheap
+                # wood stove can win the comparison at any hour.
+                static_costs[subentry_id] = (
+                    cfg.cost_eur_per_kwh(self.fuel_price_overrides.get(subentry_id)),
+                    cfg.capacity_kw,
+                )
 
         self.forecast = forecast
-        self.forecast_combined = forecast_mod.combined_slots(forecast)
+        self.forecast_combined = forecast_mod.combined_slots(forecast, static_costs=static_costs)
         self.forecast_updated = now
         self._forecast_dirty = False
         self.async_set_updated_data(self.build_hub_data())
@@ -812,6 +824,11 @@ class LiveHeatingCostsCoordinator(DataUpdateCoordinator[HubData]):
         """Persist a per-source fuel-price override and recompute immediately."""
         self.fuel_price_overrides[subentry_id] = price_per_unit_eur
         self.store.schedule_save(self.store_snapshot())
+        # The static source's flat line in the combined forecast is built from
+        # this price, so redraw it now rather than at the next 15-min rebuild.
+        self.config_entry.async_create_task(
+            self.hass, self.async_rebuild_forecast(), "live_heating_costs_forecast"
+        )
         self.async_set_updated_data(self.build_hub_data())
 
     @callback

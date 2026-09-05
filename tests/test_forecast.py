@@ -10,6 +10,7 @@ from custom_components.live_heating_costs import price_source as ps
 from custom_components.live_heating_costs.forecast import (
     SourceSlotCost,
     TempPoint,
+    anchor_temps,
     build_source_forecast,
     combined_slots,
     forecast_attr_list,
@@ -405,3 +406,110 @@ def test_combined_slots_cheapest_capacity_and_missing_cost():
 
 def test_combined_slots_empty():
     assert combined_slots({}) == []
+
+
+# --------------------------------------------------------------------------- #
+# anchor_temps
+# --------------------------------------------------------------------------- #
+
+
+def test_anchor_temps_empty_points_yields_single_anchor():
+    assert anchor_temps([], NOW, -3.5) == [TempPoint(ts=NOW, temp_c=-3.5)]
+
+
+def test_anchor_temps_prepends_when_series_starts_after_now():
+    # A weather integration's hourly series starts at the next full hour, so
+    # everything between now and it would otherwise be un-interpolatable.
+    points = [TempPoint(ts=NOW + timedelta(hours=h), temp_c=-5.0) for h in (2, 1)]
+    result = anchor_temps(points, NOW, -3.5)
+
+    assert result[0] == TempPoint(ts=NOW, temp_c=-3.5)
+    assert [p.ts for p in result] == [NOW, NOW + timedelta(hours=1), NOW + timedelta(hours=2)]
+    # The gap is now ordinary interpolation from a real reading.
+    assert interp_temp(result, NOW + timedelta(minutes=30)) == pytest.approx(-4.25)
+
+
+def test_anchor_temps_leaves_series_that_already_covers_now():
+    before = [TempPoint(ts=NOW - timedelta(minutes=10), temp_c=-1.0)]
+    assert anchor_temps(before, NOW, -3.5) == before
+
+    exactly = [TempPoint(ts=NOW, temp_c=-1.0)]
+    assert anchor_temps(exactly, NOW, -3.5) == exactly
+
+
+def test_anchor_temps_without_a_reading_is_a_no_op():
+    points = [TempPoint(ts=NOW + timedelta(hours=1), temp_c=-5.0)]
+    assert anchor_temps(points, NOW, None) == points
+    assert anchor_temps([], NOW, None) == []
+
+
+def test_anchor_temps_requires_aware_now():
+    with pytest.raises(ValueError):
+        anchor_temps([], datetime(2026, 1, 10, 0, 0), -3.5)
+
+
+# --------------------------------------------------------------------------- #
+# combined_slots: static sources + partial slots
+# --------------------------------------------------------------------------- #
+
+
+def _two_slot_pump(t, buy=0.05, capacity_kw=5.0) -> list[SourceSlotCost]:
+    return [
+        _slot_cost(t[0], t[1], buy, 4.0, capacity_kw),
+        _slot_cost(t[1], t[2], buy, 4.0, capacity_kw),
+    ]
+
+
+def test_combined_slots_static_costs_present_and_can_win():
+    t = [NOW + timedelta(minutes=15 * i) for i in range(3)]
+    result = combined_slots(
+        {"pump": _two_slot_pump(t)},
+        static_costs={"wood": (0.02, 8.0)},
+    )
+
+    assert len(result) == 2
+    for item in result:
+        assert item["costs"]["wood"] == pytest.approx(0.02)
+        assert item["cheapest"] == "wood"
+
+
+def test_combined_slots_static_zero_capacity_never_cheapest():
+    t = [NOW + timedelta(minutes=15 * i) for i in range(3)]
+    result = combined_slots(
+        {"pump": _two_slot_pump(t)},
+        static_costs={"wood": (0.001, 0.0)},  # cheapest by far, but delivers nothing
+    )
+
+    assert result[0]["costs"]["wood"] == pytest.approx(0.001)
+    assert result[0]["cheapest"] == "pump"
+
+
+def test_combined_slots_static_unknown_cost_tolerated():
+    t = [NOW + timedelta(minutes=15 * i) for i in range(3)]
+    result = combined_slots({"pump": _two_slot_pump(t)}, static_costs={"wood": (None, 8.0)})
+
+    assert result[0]["costs"]["wood"] is None
+    assert result[0]["cheapest"] == "pump"
+
+
+def test_combined_slots_partial_flags_a_missing_source():
+    t = [NOW + timedelta(minutes=15 * i) for i in range(3)]
+    resistive = [
+        _slot_cost(t[0], t[1], 0.10, 1.0, 10.0),
+        _slot_cost(t[1], t[2], 0.10, 1.0, 10.0),
+    ]
+    pump = [_slot_cost(t[1], t[2], 0.05, 4.0, 5.0)]  # no temperature that early
+
+    result = combined_slots({"resistive": resistive, "pump": pump})
+
+    assert [item["partial"] for item in result] == [True, False]
+    # cheapest is still decided from what is known in the partial slot
+    assert result[0]["cheapest"] == "resistive"
+    assert result[1]["cheapest"] == "pump"
+
+
+def test_combined_slots_empty_source_list_does_not_make_slots_partial():
+    t = [NOW + timedelta(minutes=15 * i) for i in range(3)]
+    result = combined_slots({"resistive": _two_slot_pump(t), "pump": []})
+
+    assert all(item["partial"] is False for item in result)

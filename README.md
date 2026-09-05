@@ -95,7 +95,7 @@ sensors.
 | Entity | Platform | Applies to | Unit | Meaning |
 |---|---|---|---|---|
 | Heat cost | `sensor` | all | c/kWh | Live delivered-heat cost. Unavailable whenever the cost can't be honestly computed. |
-| Capacity | `sensor` | all | kW | Current dispatchable capacity (0 for a heat pump below its operating limit, or a fuel source configured with capacity 0). |
+| Capacity | `sensor` | all | kW | Current dispatchable capacity (0 for a heat pump below its operating limit, or a fuel source configured with capacity 0 — the card shows these as "not dispatchable"). |
 | COP | `sensor` | curve, dynamic_fixed | — | Current (blended) COP. Never a silent fallback to 1.0. |
 | Cost forecast | `sensor` | curve, dynamic_fixed | c/kWh | Next slot's projected cost; the `forecast` attribute carries the full 24–48 h series. |
 | Heating | `binary_sensor` | curve | — | On while this pump is actively delivering heat (excludes idle and pure defrost). |
@@ -106,7 +106,7 @@ sensors.
 
 | Entity | Platform | Unit | Meaning |
 |---|---|---|---|
-| Cheapest source | `sensor` | — | State = name of the cheapest dispatchable source. Attributes carry the full ranking, exclusions, demand, coverage and blended cost — this is the card's main data source. |
+| Cheapest source | `sensor` | — | State = name of the cheapest dispatchable source. Attributes carry the full ranking, exclusions, demand, coverage and blended cost, plus the entity id of each ranked/excluded source's own sensor (for the card's more-info links) — this is the card's main data source. |
 | Heating demand | `sensor` | kW | Current house heat demand (internal UA model or an external entity). |
 | Heat-loss coefficient | `sensor` | W/°C | Effective UA (seed blended with learned). Attributes show seed, learned value, sample count and rolling MAE. |
 | Cost forecast | `sensor` | — | State = ISO timestamp of the last forecast rebuild; the `slots` attribute carries the combined per-source forecast. |
@@ -200,6 +200,15 @@ the integration's sensors:
 ```yaml
 type: custom:live-heating-costs-card
 ```
+
+The header is one row — title, demand pill, blended `mix X c/kWh`, and the
+Now/Forecast toggle — and the ranked sources sit in a responsive grid (two
+columns on a wide card, one on a narrow one). Every row, excluded source and
+legend chip is clickable through to that source's own more-info dialog. The
+Forecast view is pixel-true (sized via `ResizeObserver`, not stretched),
+marks "now" and the estimated-data boundary on the timeline, and now also
+plots static sources (wood, sauna) as flat cost lines so a cheap fuel source
+can show up as cheapest right alongside the heat pumps.
 
 ![Now view screenshot placeholder](docs/images/card-now.png)
 ![Forecast view screenshot placeholder](docs/images/card-forecast.png)

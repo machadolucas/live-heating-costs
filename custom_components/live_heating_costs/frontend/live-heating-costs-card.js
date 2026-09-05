@@ -6,13 +6,29 @@
  * …) by delivered-heat cost every tick and exposes that as a `ranking` array
  * (plus `excluded` sources it couldn't cost) on one sensor, and a per-source
  * cost forecast (`slots`) on a sibling sensor. This card has two views,
- * switched by a small header toggle:
+ * switched by a small header toggle, and answers one question at a glance:
+ * *what is the cheapest way to heat right now, and soon?*
  *
- *   - "Now"      — one row per ranked source (capacity, COP, cost, live
- *                  allocation bar), a demand pill, and the excluded sources.
- *   - "Forecast" — an SVG timeline: a bottom band coloured by the cheapest
- *                  source per slot, cost polylines per source above it, and a
- *                  legend. Tapping the strip shows a per-slot cost readout.
+ *   - "Now"      — a single header row (title · demand pill · blended mix ·
+ *                  view toggle) over a responsive grid of source rows: name,
+ *                  live/measured chips, the share of demand it covers, its
+ *                  dispatchable capacity ("max X kW", or "not dispatchable"
+ *                  for a 0 kW source), COP when known, and the cost. The
+ *                  excluded sources follow underneath.
+ *   - "Forecast" — a pixel-true SVG timeline (sized by a ResizeObserver, so
+ *                  nothing is stretched): a y axis in c/kWh, a solid "now"
+ *                  line at the left edge, cost polylines per source, and a
+ *                  bottom band coloured by the cheapest source per slot.
+ *                  Static sources (wood, …) carry a flat constant cost and so
+ *                  simply draw as flat lines. Slots the backend could only
+ *                  partly cost (`partial` — a heat pump with no temperature
+ *                  forecast) are drawn in the neutral divider colour, like a
+ *                  slot with no cheapest source at all. Hovering the strip
+ *                  updates the readout; tapping pins it.
+ *
+ * Rows, excluded rows, the demand pill, the mix label and the legend chips all
+ * carry `data-more-info` and open the corresponding HA more-info dialog when
+ * clicked (or on Enter/Space for the keyboard-focusable rows).
  *
  * Both the main ("…_cheapest_source") and forecast ("…_cost_forecast")
  * sensors are auto-discovered when `entity` / `forecast_entity` are omitted,
@@ -41,6 +57,20 @@ const PALETTE = [
   "#607d8b",
 ];
 
+// Forecast SVG geometry. The width is measured (ResizeObserver) so the
+// viewBox is 1:1 with CSS pixels — no `preserveAspectRatio="none"` stretching
+// of text or stroke widths any more. Everything below is in those pixels.
+const VB_H = 150; //  total svg height
+const GUTTER = 30; //  left gutter reserved for the y-axis labels
+const CHART_TOP = 18; //  top of the plotted area
+const CHART_BOTTOM = 108; //  baseline of the plotted area
+const BAND_TOP = 112; //  cheapest-source band
+const BAND_H = 14;
+const BAND_BOTTOM = BAND_TOP + BAND_H;
+const AXIS_BASELINE = 145; //  hour-label text baseline
+const FORECAST_PAD_X = 14; //  must match `.forecast` horizontal padding
+const NOW_LABEL_CLEAR_PX = 40; //  hour labels closer than this to "now" are dropped
+
 function fmt1(v) {
   const n = Number(v);
   return v == null || Number.isNaN(n) ? "—" : n.toFixed(1);
@@ -63,6 +93,11 @@ function pad2(n) {
 
 function fmtClock(d) {
   return `${pad2(d.getHours())}:${pad2(d.getMinutes())}`;
+}
+
+// Trim float noise off a tick value: 5 → "5", 0.5 → "0.5", 10 → "10".
+function fmtTick(v) {
+  return String(Number(Number(v).toFixed(2)));
 }
 
 // Any `sensor.*` whose attributes carry the integration marker plus a
@@ -109,55 +144,74 @@ function registerCard(card) {
 
 const CARD_CSS = `
   ha-card { padding: 0; overflow: hidden; }
-  .head { display: flex; align-items: center; justify-content: space-between; gap: 8px;
-          padding: 12px 14px 4px; }
-  .head .title { font-weight: 600; font-size: 1em; min-width: 0; overflow: hidden;
-          text-overflow: ellipsis; white-space: nowrap; }
-  .viewtoggle { flex: 0 0 auto; display: inline-flex; border-radius: 12px; overflow: hidden;
-          border: 1px solid var(--divider-color, rgba(127,127,127,0.4)); }
+
+  /* One header row: title · meta (demand + mix) · view toggle. On a narrow
+     card the meta group and the toggle wrap under the title. */
+  .head { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 10px;
+          padding: 10px 14px 6px; }
+  .head .title { font-weight: 600; font-size: 1em; flex: 0 1 auto; min-width: 0;
+          overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .meta { display: inline-flex; align-items: center; flex-wrap: wrap; gap: 6px 8px; min-width: 0; }
+  .viewtoggle { flex: 0 0 auto; margin-left: auto; display: inline-flex; border-radius: 12px;
+          overflow: hidden; border: 1px solid var(--divider-color, rgba(127,127,127,0.4)); }
   .vbtn { padding: 3px 10px; font-size: 0.72em; text-transform: uppercase; letter-spacing: 0.03em;
           cursor: pointer; user-select: none; color: var(--secondary-text-color); }
   .vbtn.active { background: var(--primary-color); color: var(--text-primary-color, #fff); }
-  .sub { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; padding: 2px 14px 8px; }
+
   .pill { font-size: 0.74em; font-weight: 600; padding: 2px 9px; border-radius: 10px; white-space: nowrap; }
   .pill.ok { background: color-mix(in srgb, var(--success-color, #4caf50) 20%, transparent);
           color: var(--success-color, #4caf50); }
   .pill.bad { background: color-mix(in srgb, var(--error-color, #db4437) 18%, transparent);
           color: var(--error-color, #db4437); }
-  .mix { font-size: 0.76em; color: var(--secondary-text-color); }
+  .mix { font-size: 0.76em; color: var(--secondary-text-color); white-space: nowrap; }
   .hint { color: var(--secondary-text-color); padding: 10px 14px 14px; font-size: 0.85em; }
-  .rows { display: flex; flex-direction: column; }
-  .row { padding: 6px 14px; border-left: 3px solid transparent; }
+
+  /* Anything that opens a more-info dialog is clickable; an empty attribute
+     (no entity known) deliberately keeps the default cursor. */
+  [data-more-info]:not([data-more-info=""]) { cursor: pointer; }
+
+  /* Two columns on a wide card, one when narrow — row-major, so the ranking
+     still reads 1 2 / 3 4 / 5 6 cheapest-first. */
+  .rows { display: grid; grid-template-columns: repeat(auto-fill, minmax(330px, 1fr));
+          column-gap: 8px; }
+  .row { display: flex; align-items: center; gap: 8px; min-width: 0; font-size: 0.86em;
+          padding: 5px 12px; border-left: 3px solid transparent; }
+  .row:hover { background: color-mix(in srgb, var(--primary-text-color) 6%, transparent); }
   .row.cheapest { border-left-color: var(--primary-color);
           background: color-mix(in srgb, var(--primary-color) 7%, transparent); }
-  .row-top { display: flex; align-items: center; gap: 8px; font-size: 0.86em; }
-  .row-top .name { flex: 1 1 auto; min-width: 0; font-weight: 600; display: flex; align-items: center;
-          gap: 5px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .row.cheapest:hover { background: color-mix(in srgb, var(--primary-color) 14%, transparent); }
+  .row .name { flex: 1 1 auto; min-width: 0; font-weight: 600; display: flex; align-items: center;
+          gap: 5px; white-space: nowrap; overflow: hidden; }
+  .row .name .label { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
   .dot { width: 7px; height: 7px; border-radius: 50%; background: #ff9800; flex: 0 0 auto;
           animation: lhc-pulse 1.6s ease-in-out infinite; }
   .chip { font-size: 0.6em; text-transform: uppercase; letter-spacing: 0.03em; padding: 1px 5px;
           border-radius: 6px; background: var(--secondary-background-color, rgba(127,127,127,0.15));
           color: var(--secondary-text-color); flex: 0 0 auto; }
+  .chip.ok { text-transform: none; letter-spacing: 0; font-size: 0.68em; font-weight: 600;
+          background: color-mix(in srgb, var(--success-color, #4caf50) 20%, transparent);
+          color: var(--success-color, #4caf50); }
   .cap, .cop { color: var(--secondary-text-color); font-size: 0.86em; white-space: nowrap; flex: 0 0 auto; }
+  .cap.none { font-style: italic; opacity: 0.75; }
   .cost { font-weight: 700; font-variant-numeric: tabular-nums; white-space: nowrap; flex: 0 0 auto;
           min-width: 5.4em; text-align: right; }
-  .alloc-track { margin-top: 4px; height: 4px; border-radius: 2px;
-          background: var(--divider-color, rgba(127,127,127,0.25)); overflow: hidden; }
-  .alloc-bar { height: 100%; border-radius: 2px;
-          background: color-mix(in srgb, var(--primary-color) 32%, transparent); }
-  .alloc-fill { height: 100%; border-radius: 2px; background: var(--primary-color); }
-  .excluded { padding: 6px 14px 12px; margin-top: 4px;
+
+  .excluded { padding: 4px 12px 10px; margin-top: 2px;
           border-top: 1px solid var(--divider-color, rgba(127,127,127,0.2)); }
   .exrow { display: flex; justify-content: space-between; gap: 8px; font-size: 0.76em;
-          color: var(--secondary-text-color); line-height: 1.5; }
+          color: var(--secondary-text-color); line-height: 1.45; padding: 1px 0; }
+  .exrow:hover { background: color-mix(in srgb, var(--primary-text-color) 6%, transparent); }
   @keyframes lhc-pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.35; } }
 
-  .forecast { padding: 6px 14px 12px; }
-  svg.strip { display: block; width: 100%; height: 110px; cursor: crosshair; touch-action: manipulation; }
-  .axis-label { fill: var(--secondary-text-color); font-size: 9px; }
-  .approx-label { fill: var(--secondary-text-color); font-size: 10px; }
-  .readout { min-height: 1.3em; margin-top: 6px; font-size: 0.78em; color: var(--secondary-text-color); }
-  .legend { display: flex; flex-wrap: wrap; gap: 6px 12px; margin-top: 8px; }
+  .forecast { padding: 6px ${FORECAST_PAD_X}px 12px; }
+  svg.strip { display: block; width: 100%; height: ${VB_H}px; cursor: crosshair;
+          touch-action: manipulation; }
+  .axis-label { fill: var(--secondary-text-color); font-size: 11px; }
+  .unit-label { fill: var(--secondary-text-color); font-size: 9px; }
+  .now-label { fill: var(--primary-color); font-size: 11px; font-weight: 600; }
+  .approx-label { fill: var(--secondary-text-color); font-size: 11px; }
+  .readout { min-height: 2.4em; margin-top: 4px; font-size: 0.8em; color: var(--secondary-text-color); }
+  .legend { display: flex; flex-wrap: wrap; gap: 4px 12px; margin-top: 6px; }
   .legchip { display: inline-flex; align-items: center; gap: 5px; font-size: 0.78em;
           color: var(--secondary-text-color); }
   .legchip.bold { font-weight: 700; color: var(--primary-text-color); }
@@ -170,6 +224,7 @@ class LiveHeatingCostsCard extends HTMLElement {
     this._config = config || {};
     this._view = "now";
     this._tapped = null;
+    this._pinned = false;
     this._colorMap = this._colorMap || new Map();
     this._uid = this._uid || Math.random().toString(36).slice(2, 8);
     this._sig = null;
@@ -181,14 +236,60 @@ class LiveHeatingCostsCard extends HTMLElement {
     this._render();
   }
 
+  // The forecast SVG is drawn 1:1 with CSS pixels, so it has to know the
+  // card's real width. A ResizeObserver is the only reliable way to learn it
+  // (the card can be resized by the grid, the sidebar, or the window).
+  connectedCallback() {
+    if (typeof ResizeObserver === "undefined") return;
+    if (!this._ro) {
+      this._ro = new ResizeObserver((entries) => {
+        for (const entry of entries) {
+          const box = entry.contentRect || {};
+          this._onResize(box.width || 0);
+        }
+      });
+    }
+    try {
+      this._ro.observe(this);
+    } catch (err) {
+      /* detached / unsupported — fall back to the default width */
+    }
+  }
+
+  disconnectedCallback() {
+    if (this._ro) this._ro.disconnect();
+  }
+
+  _onResize(outerWidth) {
+    // An inline (or not-yet-laid-out) host reports 0×0 — that's "unknown",
+    // not "tiny", so keep whatever width we had rather than collapsing.
+    if (!(outerWidth > 0)) return;
+    const w = Math.max(120, Math.round(outerWidth - FORECAST_PAD_X * 2));
+    // Only re-render on a real change: the render itself can nudge layout, so
+    // reacting to every observer callback would loop.
+    if (!(w > 0) || w === this._width) return;
+    this._width = w;
+    this._render();
+  }
+
+  // Best-effort first measurement, for the tick before the observer fires.
+  _measureOnce() {
+    if (this._width != null) return;
+    if (typeof this.getBoundingClientRect !== "function") return;
+    const rect = this.getBoundingClientRect() || {};
+    if (rect.width > 0) this._width = Math.max(120, Math.round(rect.width - FORECAST_PAD_X * 2));
+  }
+
   getCardSize() {
-    // Masonry fallback: estimate height units from the current content
-    // (header + demand/mix line + one per ranked source + an excluded line).
+    // Masonry fallback: header + the grid of ranked sources (two columns once
+    // the card is wide enough for `minmax(330px, …)` to fit twice) + the
+    // excluded block.
     const id = this._hass ? this._mainEntityId() : null;
     const a = (id && this._hass.states[id] && this._hass.states[id].attributes) || {};
     const rank = Array.isArray(a.ranking) ? a.ranking.length : 5;
     const excl = Array.isArray(a.excluded) && a.excluded.length ? 1 : 0;
-    return 2 + rank + excl;
+    const cols = (this._width || 0) >= 690 ? 2 : 1;
+    return 1 + Math.ceil(rank / cols) + excl;
   }
 
   // Sections (grid) dashboards: size to content. The Now view (one row per
@@ -217,7 +318,8 @@ class LiveHeatingCostsCard extends HTMLElement {
 
   // Stable colour per subentry id: assigned once, in order of first sighting
   // (cheapest-first from the ranking, then any left over from the forecast's
-  // `names`), then never reassigned for the life of this card element.
+  // `names`, then anything only a slot's `costs` mentions), then never
+  // reassigned for the life of this card element.
   _colorFor(id) {
     if (!this._colorMap.has(id)) {
       this._colorMap.set(id, PALETTE[this._colorMap.size % PALETTE.length]);
@@ -228,11 +330,29 @@ class LiveHeatingCostsCard extends HTMLElement {
   _ensureColors(mainState, forecastState) {
     const ranking = (mainState && mainState.attributes && mainState.attributes.ranking) || [];
     ranking.forEach((r) => this._colorFor(r.subentry_id));
-    const names = (forecastState && forecastState.attributes && forecastState.attributes.names) || {};
-    Object.keys(names).forEach((id) => this._colorFor(id));
+    const fa = (forecastState && forecastState.attributes) || {};
+    Object.keys(fa.names || {}).forEach((id) => this._colorFor(id));
+    (Array.isArray(fa.slots) ? fa.slots : []).forEach((s) => {
+      Object.keys(s.costs || {}).forEach((id) => this._colorFor(id));
+    });
   }
 
-  // ---- Now view ---------------------------------------------------------
+  // subentry_id → the source's own heat-cost sensor, so a legend chip can open
+  // the same more-info dialog its Now-view row does.
+  _entityMap(mainState) {
+    const map = new Map();
+    const a = (mainState && mainState.attributes) || {};
+    const add = (rows) => {
+      (Array.isArray(rows) ? rows : []).forEach((r) => {
+        if (r && r.subentry_id && r.entity_id) map.set(r.subentry_id, r.entity_id);
+      });
+    };
+    add(a.ranking);
+    add(a.excluded);
+    return map;
+  }
+
+  // ---- Header -----------------------------------------------------------
 
   _demandPillHtml(a) {
     if (a.demand_kw == null) return "";
@@ -240,32 +360,60 @@ class LiveHeatingCostsCard extends HTMLElement {
     const cls = covered ? "pill ok" : "pill bad";
     let text = `▲ ${fmt1(a.demand_kw)} kW demand`;
     if (!covered && a.shortfall_kw != null) text += ` · short ${fmt1(a.shortfall_kw)} kW`;
-    return `<span class="${cls}">${text}</span>`;
+    const title =
+      "House heat demand right now (heat-loss coefficient × temperature deficit, " +
+      "or the external demand entity)";
+    return `<span class="${cls}" data-more-info="${esc(a.demand_entity_id || "")}" title="${esc(
+      title,
+    )}">${text}</span>`;
   }
 
-  _allocBarHtml(r) {
-    const share = Math.max(0, Math.min(1, r.allocated_fraction || 0)) * 100;
-    const util =
-      r.capacity_kw > 0 ? Math.max(0, Math.min(1, r.allocated_kw / r.capacity_kw)) * 100 : 0;
-    return (
-      `<div class="alloc-track"><div class="alloc-bar" style="width:${share}%">` +
-      `<div class="alloc-fill" style="width:${util}%"></div></div></div>`
-    );
+  _headHtml(mainState, showForecast) {
+    const title = this._config.title || "Heating costs";
+    const a = (mainState && mainState.attributes) || {};
+    const mainId = this._mainEntityId();
+    const pill = this._demandPillHtml(a);
+    const mix =
+      a.blended_cost_c_per_kwh != null
+        ? `<span class="mix" data-more-info="${esc(
+            mainId || "",
+          )}" title="Demand-weighted average cost of the sources currently allocated">mix ${fmt1(
+            a.blended_cost_c_per_kwh,
+          )} c/kWh</span>`
+        : "";
+    const meta = pill || mix ? `<span class="meta">${pill}${mix}</span>` : "";
+    return `<div class="head"><span class="title">${esc(title)}</span>${meta}${
+      showForecast ? this._toggleHtml() : ""
+    }</div>`;
   }
+
+  // ---- Now view ---------------------------------------------------------
 
   _rowHtml(r, isCheapest) {
     const dot = r.active ? `<span class="dot" title="active"></span>` : "";
     const measured = r.measured_blend ? `<span class="chip">measured</span>` : "";
+    const covers =
+      r.allocated_kw > 0
+        ? `<span class="chip ok" title="Share of the current demand assigned to this source (cheapest-first)">covers ${fmt1(
+            r.allocated_kw,
+          )} kW</span>`
+        : "";
+    // A 0 kW source still contributes measured heat, it just never gets
+    // planned for — say so instead of printing a meaningless "0.0 kW".
+    const cap =
+      r.capacity_kw > 0
+        ? `<span class="cap" title="Dispatchable heat output right now">max ${fmt1(
+            r.capacity_kw,
+          )} kW</span>`
+        : `<span class="cap none" title="Configured with 0 kW capacity: its heat counts, but it is never planned for">not dispatchable</span>`;
     const cop = r.cop != null ? `<span class="cop">COP ${fmt1(r.cop)}</span>` : "";
-    const bar = r.allocated_kw > 0 ? this._allocBarHtml(r) : "";
-    return `<div class="row${isCheapest ? " cheapest" : ""}">
-      <div class="row-top">
-        <span class="name">${esc(r.name)}${dot}${measured}</span>
-        <span class="cap">${fmt1(r.capacity_kw)} kW</span>
-        ${cop}
-        <span class="cost">${fmt1(r.cost_c_per_kwh)} c/kWh</span>
-      </div>
-      ${bar}
+    return `<div class="row${
+      isCheapest ? " cheapest" : ""
+    }" role="button" tabindex="0" data-more-info="${esc(r.entity_id || "")}">
+      <span class="name"><span class="label">${esc(r.name)}</span>${dot}${measured}${covers}</span>
+      ${cap}
+      ${cop}
+      <span class="cost">${fmt1(r.cost_c_per_kwh)} c/kWh</span>
     </div>`;
   }
 
@@ -276,26 +424,21 @@ class LiveHeatingCostsCard extends HTMLElement {
     const a = mainState.attributes || {};
     const ranking = Array.isArray(a.ranking) ? a.ranking : [];
     const excluded = Array.isArray(a.excluded) ? a.excluded : [];
-    const demandPill = this._demandPillHtml(a);
-    const mix =
-      a.blended_cost_c_per_kwh != null
-        ? `<span class="mix">mix ${fmt1(a.blended_cost_c_per_kwh)} c/kWh</span>`
-        : "";
-    const sub = demandPill || mix ? `<div class="sub">${demandPill}${mix}</div>` : "";
     const rows = ranking.length
       ? `<div class="rows">${ranking.map((r, i) => this._rowHtml(r, i === 0)).join("")}</div>`
       : `<div class="hint">No ranked sources right now.</div>`;
     const exclHtml = excluded.length
       ? `<div class="excluded">${excluded
-          .map(
-            (x) =>
-              `<div class="exrow"><span>${esc(x.name)}</span><span>${esc(
-                reasonLabel(x.reason),
-              )}</span></div>`,
-          )
+          .map((x) => {
+            const eid = esc(x.entity_id || "");
+            const focusable = x.entity_id ? ` role="button" tabindex="0"` : "";
+            return `<div class="exrow" data-more-info="${eid}"${focusable}><span>${esc(
+              x.name,
+            )}</span><span>${esc(reasonLabel(x.reason))}</span></div>`;
+          })
           .join("")}</div>`
       : "";
-    return `${sub}${rows}${exclHtml}`;
+    return `${rows}${exclHtml}`;
   }
 
   // ---- Forecast view ------------------------------------------------------
@@ -304,41 +447,74 @@ class LiveHeatingCostsCard extends HTMLElement {
     return this._config.hours === 48 ? 48 : 24;
   }
 
-  // x in [0, VB_W] over [rangeStart, rangeEnd].
+  // x in [GUTTER, VB_W] over [rangeStart, rangeEnd].
   _xScale(t, rangeStart, rangeEnd) {
     const span = rangeEnd - rangeStart;
     const frac = span > 0 ? (t - rangeStart) / span : 0;
-    return Math.max(0, Math.min(this._VB_W, frac * this._VB_W));
+    const clamped = Math.max(0, Math.min(1, frac));
+    return GUTTER + clamped * (this._VB_W - GUTTER);
   }
 
   _yScale(cost, yMax) {
     const clamped = Math.max(0, Math.min(cost, yMax));
     const frac = yMax > 0 ? clamped / yMax : 0;
-    return this._CHART_BOTTOM - frac * (this._CHART_BOTTOM - this._CHART_TOP);
+    return CHART_BOTTOM - frac * (CHART_BOTTOM - CHART_TOP);
   }
 
-  _hourLabels(rangeStart, rangeEnd) {
+  // 2–4 "nice" gridline values under yMax (0 excluded — the chart baseline is
+  // already 0). Steps come from the usual {1,2,5}×10^n ladder.
+  _yTicks(yMax) {
+    if (!(yMax > 0)) return [];
+    let step = null;
+    outer: for (let e = -3; e <= 5; e++) {
+      for (const m of [1, 2, 5]) {
+        const s = m * Math.pow(10, e);
+        const n = Math.floor(yMax / s + 1e-9);
+        if (n >= 2 && n <= 4) {
+          step = s;
+          break outer;
+        }
+      }
+    }
+    if (step == null) step = yMax / 3;
+    const ticks = [];
+    for (let i = 1; i <= 4; i++) {
+      const v = i * step;
+      if (v > yMax * 1.0001) break;
+      ticks.push(v);
+    }
+    return ticks;
+  }
+
+  // Hour gridlines: denser on a wide strip, sparser on a phone-width one.
+  _hourStep() {
+    const w = this._VB_W || 800;
+    if (w >= 700) return 3;
+    if (w < 360) return 12;
+    return 6;
+  }
+
+  _hourLabels(rangeStart, rangeEnd, stepHours) {
     const labels = [];
     let t = new Date(rangeStart);
     t.setMinutes(0, 0, 0);
     if (t <= rangeStart) t = new Date(t.getTime() + 3600000);
-    while (t.getHours() % 6 !== 0) t = new Date(t.getTime() + 3600000);
+    let guard = 0;
+    while (t.getHours() % stepHours !== 0 && guard++ < 48) {
+      t = new Date(t.getTime() + 3600000);
+    }
     while (t < rangeEnd) {
       labels.push(new Date(t));
-      t = new Date(t.getTime() + 6 * 3600000);
+      t = new Date(t.getTime() + stepHours * 3600000);
     }
     return labels;
   }
 
   _timelineSvg(shown, names, rangeStart, rangeEnd) {
     const W = this._VB_W;
-    const H = this._VB_H;
-    const CT = this._CHART_TOP;
-    const CB = this._CHART_BOTTOM;
-    const BT = this._BAND_TOP;
-    const BH = this._BAND_H;
-    const BB = BT + BH;
+    const H = VB_H;
     const hatchId = `lhc-hatch-${this._uid}`;
+    const neutral = "var(--divider-color, #888)";
 
     // y-scale: clamp outliers at p95 * 1.3 so one spike doesn't flatten
     // every other line.
@@ -361,7 +537,21 @@ class LiveHeatingCostsCard extends HTMLElement {
     const x = (t) => this._xScale(t, rangeStart, rangeEnd);
     const y = (c) => this._yScale(c, yMax);
 
-    // Bottom band, coloured per slot by its cheapest source.
+    // y axis: faint gridlines across the plot, right-aligned labels in the
+    // gutter, and one unit label above them.
+    let yAxis = `<text x="0" y="${CHART_TOP - 6}" class="unit-label">c/kWh</text>`;
+    this._yTicks(yMax).forEach((v) => {
+      const ly = y(v);
+      yAxis +=
+        `<line x1="${GUTTER}" y1="${ly}" x2="${W}" y2="${ly}" stroke="var(--divider-color, rgba(127,127,127,0.2))" stroke-width="1"></line>` +
+        `<text x="${GUTTER - 4}" y="${ly + 3.5}" class="axis-label" text-anchor="end">${fmtTick(
+          v,
+        )}</text>`;
+    });
+
+    // Bottom band, coloured per slot by its cheapest source. A `partial` slot
+    // (a heat pump whose cost is unknown because there's no temperature
+    // forecast) is as unknown as one with no cheapest at all → neutral.
     let band = "";
     let lastRealEnd = null;
     let anyEstimated = false;
@@ -371,18 +561,26 @@ class LiveHeatingCostsCard extends HTMLElement {
       if (s1 <= s0) return;
       const x0 = x(s0);
       const x1 = x(s1);
-      const color = s.cheapest ? this._colorFor(s.cheapest) : "var(--divider-color, #888)";
-      band += `<rect x="${x0}" y="${BT}" width="${Math.max(0, x1 - x0)}" height="${BH}" fill="${color}"></rect>`;
+      const color = s.cheapest && !s.partial ? this._colorFor(s.cheapest) : neutral;
+      band += `<rect x="${x0}" y="${BAND_TOP}" width="${Math.max(
+        0,
+        x1 - x0,
+      )}" height="${BAND_H}" fill="${color}"></rect>`;
       if (s.estimated) {
         anyEstimated = true;
-        band += `<rect x="${x0}" y="${BT}" width="${Math.max(0, x1 - x0)}" height="${BH}" fill="url(#${hatchId})" opacity="0.55"></rect>`;
+        band += `<rect x="${x0}" y="${BAND_TOP}" width="${Math.max(
+          0,
+          x1 - x0,
+        )}" height="${BAND_H}" fill="url(#${hatchId})" opacity="0.55"></rect>`;
       } else {
         lastRealEnd = lastRealEnd == null ? s1 : Math.max(lastRealEnd, s1);
       }
     });
 
     // Per-source cost polylines, split into segments so estimated slots can
-    // be dashed independently.
+    // be dashed independently and a gap (unknown cost) simply isn't drawn.
+    // Static sources have a flat cost in every slot, so they draw as a flat
+    // line with no special handling.
     let lines = "";
     for (const id of this._colorMap.keys()) {
       const color = this._colorMap.get(id);
@@ -399,63 +597,89 @@ class LiveHeatingCostsCard extends HTMLElement {
       }
     }
 
-    // "Now" tick at the left edge; hour gridlines every 6h; end-of-real-data
-    // marker (with a small "≈") beyond which slots are estimated.
-    const nowTick = `<line x1="0" y1="${CT}" x2="0" y2="${BB}" class="axis-label" stroke="var(--primary-color)" stroke-dasharray="2,2"></line>`;
-    const hourLabels = this._hourLabels(rangeStart, rangeEnd)
+    // Hour gridlines; the label is dropped when it would collide with "now".
+    const stepHours = this._hourStep();
+    const hourLabels = this._hourLabels(rangeStart, rangeEnd, stepHours)
       .map((d) => {
         const lx = x(d.getTime());
+        const text =
+          Math.abs(lx - GUTTER) < NOW_LABEL_CLEAR_PX
+            ? ""
+            : `<text x="${lx}" y="${AXIS_BASELINE}" class="axis-label" text-anchor="middle">${pad2(
+                d.getHours(),
+              )}:00</text>`;
         return (
-          `<line x1="${lx}" y1="${CT}" x2="${lx}" y2="${BB}" stroke="var(--divider-color, rgba(127,127,127,0.2))" stroke-width="1"></line>` +
-          `<text x="${lx}" y="${H - 3}" class="axis-label" text-anchor="middle">${pad2(d.getHours())}:00</text>`
+          `<line x1="${lx}" y1="${CHART_TOP}" x2="${lx}" y2="${BAND_BOTTOM}" stroke="var(--divider-color, rgba(127,127,127,0.2))" stroke-width="1"></line>` +
+          text
         );
       })
       .join("");
+
+    // "Now" — a solid accent line at the left edge of the plot, labelled with
+    // the wall clock so the timeline's origin is never ambiguous.
+    const nowLine =
+      `<line x1="${GUTTER}" y1="${CHART_TOP}" x2="${GUTTER}" y2="${BAND_BOTTOM}" stroke="var(--primary-color)" stroke-width="2"></line>` +
+      `<text x="${GUTTER + 4}" y="${CHART_TOP - 6}" class="now-label">now ${esc(
+        fmtClock(new Date()),
+      )}</text>`;
+
+    // End-of-real-data boundary, beyond which slots are extrapolated.
     let marker = "";
     if (anyEstimated && lastRealEnd != null) {
       const mx = x(lastRealEnd);
+      const labelW = 58; // rough width of "≈ estimate" at 11px
+      const fitsRight = mx + 4 + labelW <= W;
       marker =
-        `<line x1="${mx}" y1="${CT}" x2="${mx}" y2="${BB}" stroke="var(--secondary-text-color)" stroke-width="1" stroke-dasharray="1,2"></line>` +
-        `<text x="${mx + 4}" y="${CT + 9}" class="approx-label">≈</text>`;
+        `<line x1="${mx}" y1="${CHART_TOP}" x2="${mx}" y2="${BAND_BOTTOM}" stroke="var(--secondary-text-color)" stroke-width="1" stroke-dasharray="1,2"></line>` +
+        (fitsRight
+          ? `<text x="${mx + 4}" y="${CHART_TOP + 12}" class="approx-label">≈ estimate</text>`
+          : `<text x="${
+              mx - 4
+            }" y="${CHART_TOP + 12}" class="approx-label" text-anchor="end">≈ estimate</text>`);
     }
 
-    return `<svg class="strip" viewBox="0 0 ${W} ${H}" preserveAspectRatio="none">
+    return `<svg class="strip" viewBox="0 0 ${W} ${H}">
       <defs>
         <pattern id="${hatchId}" width="4" height="4" patternTransform="rotate(45)" patternUnits="userSpaceOnUse">
           <rect width="4" height="4" fill="transparent"></rect>
           <line x1="0" y1="0" x2="0" y2="4" stroke="rgba(255,255,255,0.9)" stroke-width="1"></line>
         </pattern>
       </defs>
+      ${yAxis}
       ${hourLabels}
       ${band}
       ${lines}
-      ${nowTick}
+      ${nowLine}
       ${marker}
     </svg>`;
   }
 
-  _legendHtml(mainState, names) {
-    const cheapestId =
-      mainState &&
-      mainState.attributes &&
-      Array.isArray(mainState.attributes.ranking) &&
-      mainState.attributes.ranking[0]
-        ? mainState.attributes.ranking[0].subentry_id
-        : null;
+  _legendHtml(mainState, names, slots) {
+    const ranking =
+      (mainState && mainState.attributes && Array.isArray(mainState.attributes.ranking)
+        ? mainState.attributes.ranking
+        : []) || [];
+    const cheapestId = ranking[0] ? ranking[0].subentry_id : null;
     const visible = new Set([
       ...Object.keys(names || {}),
-      ...((mainState && mainState.attributes && mainState.attributes.ranking) || []).map(
-        (r) => r.subentry_id,
-      ),
+      ...ranking.map((r) => r.subentry_id),
+      ...(
+        (mainState && mainState.attributes && mainState.attributes.excluded) ||
+        []
+      ).map((x) => x.subentry_id),
     ]);
+    (Array.isArray(slots) ? slots : []).forEach((s) => {
+      Object.keys(s.costs || {}).forEach((id) => visible.add(id));
+    });
+    const entities = this._entityMap(mainState);
     const chips = [...this._colorMap.entries()]
       .filter(([id]) => visible.has(id))
       .map(([id, color]) => {
         const label = (names && names[id]) || id;
         const bold = id === cheapestId ? " bold" : "";
-        return `<span class="legchip${bold}" style="--c:${color}"><span class="swatch"></span>${esc(
-          label,
-        )}</span>`;
+        return `<span class="legchip${bold}" style="--c:${color}" data-more-info="${esc(
+          entities.get(id) || "",
+        )}"><span class="swatch"></span>${esc(label)}</span>`;
       })
       .join("");
     return chips ? `<div class="legend">${chips}</div>` : "";
@@ -472,7 +696,8 @@ class LiveHeatingCostsCard extends HTMLElement {
       .sort((p, q) => p.cost - q.cost);
     const line = entries.map((e) => `${esc(e.name)}: ${fmt1(e.cost)} c`).join(" · ");
     const est = slot.estimated ? " (estimated)" : "";
-    return `<div class="readout">${range} — ${line || "no data"}${est}</div>`;
+    const partial = slot.partial ? " · heat-pump cost unknown (no temperature forecast)" : "";
+    return `<div class="readout">${range} — ${line || "no data"}${est}${partial}</div>`;
   }
 
   _forecastHtml(mainState, forecastState) {
@@ -495,18 +720,13 @@ class LiveHeatingCostsCard extends HTMLElement {
     const rangeStart = now;
     const lastEnd = new Date(shown[shown.length - 1].end);
     const rangeEnd = lastEnd < horizonEnd ? lastEnd : horizonEnd;
-    this._VB_W = 800;
-    this._VB_H = 110;
-    this._CHART_TOP = 4;
-    this._CHART_BOTTOM = 78;
-    this._BAND_TOP = 80;
-    this._BAND_H = 14;
-    // Cached so the click handler can map a pointer position back to a slot
-    // without rebuilding the whole forecast.
-    this._chartState = { shown, rangeStart, rangeEnd };
+    this._VB_W = this._width || 800;
+    // Cached so the click/hover handlers can map a pointer position back to a
+    // slot without rebuilding the whole forecast.
+    this._chartState = { shown, rangeStart, rangeEnd, vbW: this._VB_W };
     const svg = this._timelineSvg(shown, names, rangeStart, rangeEnd);
     const readout = this._readoutHtml(names);
-    const legend = this._legendHtml(mainState, names);
+    const legend = this._legendHtml(mainState, names, slots);
     return `<div class="forecast">${svg}${readout}${legend}</div>`;
   }
 
@@ -519,6 +739,35 @@ class LiveHeatingCostsCard extends HTMLElement {
     </span>`;
   }
 
+  _moreInfo(entityId) {
+    this.dispatchEvent(
+      new CustomEvent("hass-more-info", {
+        detail: { entityId },
+        bubbles: true,
+        composed: true,
+      }),
+    );
+  }
+
+  // Map a viewport x back to the forecast slot under it. The viewBox is 1:1
+  // with CSS pixels, but scale anyway so a zoomed/scaled card still works.
+  _slotAt(strip, clientX) {
+    if (!strip || !this._chartState) return null;
+    const { shown, rangeStart, rangeEnd, vbW } = this._chartState;
+    const rect = strip.getBoundingClientRect();
+    if (!rect || !(rect.width > 0)) return null;
+    const scale = vbW > 0 ? rect.width / vbW : 1;
+    const px = scale > 0 ? (clientX - rect.left) / scale : 0;
+    const plotW = vbW - GUTTER;
+    const frac = plotW > 0 ? Math.max(0, Math.min(1, (px - GUTTER) / plotW)) : 0;
+    const t = rangeStart.getTime() + frac * (rangeEnd.getTime() - rangeStart.getTime());
+    return (
+      shown.find((s) => t >= new Date(s.start).getTime() && t < new Date(s.end).getTime()) ||
+      shown[shown.length - 1] ||
+      null
+    );
+  }
+
   _onClick(e) {
     const vbtn = e.target.closest("[data-view]");
     if (vbtn) {
@@ -527,19 +776,44 @@ class LiveHeatingCostsCard extends HTMLElement {
       this._render();
       return;
     }
+    const mi = e.target.closest("[data-more-info]");
+    if (mi && mi.dataset && mi.dataset.moreInfo) {
+      this._moreInfo(mi.dataset.moreInfo);
+      return;
+    }
     const strip = e.target.closest("svg.strip");
-    if (strip && this._chartState) {
-      const rect = strip.getBoundingClientRect();
-      const frac = rect.width > 0 ? Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width)) : 0;
-      const { rangeStart, rangeEnd, shown } = this._chartState;
-      const t = rangeStart.getTime() + frac * (rangeEnd.getTime() - rangeStart.getTime());
-      const slot =
-        shown.find((s) => t >= new Date(s.start).getTime() && t < new Date(s.end).getTime()) ||
-        shown[shown.length - 1];
-      this._tapped = slot;
+    if (strip) {
+      const slot = this._slotAt(strip, e.clientX);
+      if (!slot) return;
+      // Tapping the already-pinned slot unpins it and hands control back to
+      // hover; tapping a different one moves the pin.
+      if (this._pinned && this._tapped && this._tapped.start === slot.start) {
+        this._pinned = false;
+      } else {
+        this._tapped = slot;
+        this._pinned = true;
+      }
       this._sig = null;
       this._render();
     }
+  }
+
+  _onPointerMove(e) {
+    if (this._pinned) return;
+    const strip = e.target.closest && e.target.closest("svg.strip");
+    if (!strip) return;
+    const slot = this._slotAt(strip, e.clientX);
+    if (!slot || (this._tapped && this._tapped.start === slot.start)) return;
+    this._tapped = slot;
+    this._render();
+  }
+
+  _onKeyDown(e) {
+    if (e.key !== "Enter" && e.key !== " " && e.key !== "Spacebar") return;
+    const target = e.target.closest && e.target.closest("[role=button]");
+    if (!target || !target.dataset || !target.dataset.moreInfo) return;
+    if (e.preventDefault) e.preventDefault();
+    this._moreInfo(target.dataset.moreInfo);
   }
 
   _signature() {
@@ -551,20 +825,29 @@ class LiveHeatingCostsCard extends HTMLElement {
       JSON.stringify(this._config),
       this._view,
       Math.floor(Date.now() / 60000),
+      Math.round(this._width || 0),
       mainId || "",
       mainState ? mainState.state + JSON.stringify(mainState.attributes) : "missing",
       fcId || "",
       fcState ? JSON.stringify(fcState.attributes) : "missing",
       this._tapped ? this._tapped.start : "",
+      this._pinned ? "pin" : "",
     ].join("§");
   }
 
   _render() {
     if (!this._hass || !this._config) return;
+    this._measureOnce();
     if (!this._card) {
+      // Custom elements are `display: inline` by default, and an inline box
+      // has no measurable width (ResizeObserver reports 0) — the forecast
+      // SVG is sized from this element, so it must be block-level.
+      if (this.style) this.style.display = "block";
       this._card = document.createElement("ha-card");
       this.appendChild(this._card);
       this._card.addEventListener("click", (e) => this._onClick(e));
+      this._card.addEventListener("pointermove", (e) => this._onPointerMove(e));
+      this._card.addEventListener("keydown", (e) => this._onKeyDown(e));
     }
     const sig = this._signature();
     if (sig === this._sig) return;
@@ -572,16 +855,13 @@ class LiveHeatingCostsCard extends HTMLElement {
 
     const showForecast = this._config.show_forecast !== false;
     if (!showForecast) this._view = "now";
-    const title = this._config.title || "Heating costs";
-    const head = `<div class="head"><span class="title">${esc(title)}</span>${
-      showForecast ? this._toggleHtml() : ""
-    }</div>`;
 
     const mainId = this._mainEntityId();
     const mainState = mainId ? this._hass.states[mainId] : null;
     const fcId = this._forecastEntityId();
     const fcState = fcId ? this._hass.states[fcId] : null;
 
+    const head = this._headHtml(mainState, showForecast);
     const body =
       this._view === "forecast"
         ? this._forecastHtml(mainState, fcState)

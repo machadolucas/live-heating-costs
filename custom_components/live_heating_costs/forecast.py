@@ -74,6 +74,36 @@ def interp_temp(points: Sequence[TempPoint], t: datetime) -> float | None:
     return pts[-1].temp_c  # t exactly equals the last point's timestamp
 
 
+def anchor_temps(
+    points: Sequence[TempPoint], now: datetime, current_temp_c: float | None
+) -> list[TempPoint]:
+    """Prepend the measured outdoor temperature as a ``now`` point when needed.
+
+    A weather integration's hourly forecast starts at the *next* full hour, so
+    the slots between ``now`` and that hour fall outside the points' covered
+    range. :func:`interp_temp` refuses to extrapolate there (rightly), which
+    silently drops every curve source from those slots — and
+    :func:`combined_slots` then crowns a resistive source "cheapest" for the
+    current hour, which is exactly wrong.
+
+    The fix isn't extrapolation: the *measured* outdoor temperature is the
+    honest value for right now, better than any forecast point. Anchoring the
+    series with it turns those leading slots back into ordinary interpolation
+    between a real reading and the first forecast point.
+
+    Only prepends when there's something to fix: no anchor is added when the
+    series already covers ``now`` (its earliest point is at or before it), nor
+    when no current reading is available.
+    """
+    _require_aware(now, "now")
+    if current_temp_c is None:
+        return list(points)
+    ordered = sorted(points, key=lambda p: p.ts)
+    if ordered and ordered[0].ts <= now:
+        return list(points)
+    return [TempPoint(ts=now, temp_c=current_temp_c), *ordered]
+
+
 def _window_filter(
     slots: Sequence[ForecastSlot], now: datetime, horizon_end: datetime
 ) -> list[ForecastSlot]:
@@ -190,7 +220,10 @@ def forecast_attr_list(slots: Sequence[SourceSlotCost]) -> list[dict]:
     ]
 
 
-def combined_slots(per_source: Mapping[str, Sequence[SourceSlotCost]]) -> list[dict]:
+def combined_slots(
+    per_source: Mapping[str, Sequence[SourceSlotCost]],
+    static_costs: Mapping[str, tuple[float | None, float]] | None = None,
+) -> list[dict]:
     """Union per-source forecasts by exact ``(start, end)`` boundary.
 
     Source slot grids are aligned (15-min, all derived from the same price
@@ -201,15 +234,32 @@ def combined_slots(per_source: Mapping[str, Sequence[SourceSlotCost]]) -> list[d
     that can't currently deliver any heat is never "cheapest" even if its
     theoretical cost is lowest); ``estimated`` is true if any contributing
     slot came from the estimated series.
+
+    ``static_costs`` folds in the sources whose cost doesn't vary with time or
+    weather (wood, sauna) as ``{subentry_id: (cost_eur_per_kwh, capacity_kw)}``
+    — they have no per-slot forecast of their own, but leaving them out of the
+    comparison made the forecast band claim a source was cheapest when a
+    flat-priced one actually beat it all day. Same eligibility rule as a
+    forecast source: a known cost and nonzero capacity.
+
+    ``partial`` flags a boundary where a source that *does* have forecast
+    slots elsewhere is missing here — e.g. a heat pump at a slot the weather
+    series can't reach, so its cost is unknown rather than high. ``cheapest``
+    is still computed from what is known; rendering that caveat is the card's
+    job.
     """
     by_key: dict[tuple[datetime, datetime], dict[str, SourceSlotCost]] = {}
     for slug, slots in per_source.items():
         for s in slots:
             by_key.setdefault((s.start, s.end), {})[slug] = s
 
+    # Only sources that actually produced slots can be "missing" from one.
+    expected = {slug for slug, slots in per_source.items() if slots}
+    statics = dict(static_costs or {})
+
     result: list[dict] = []
     for (start, end), sources in sorted(by_key.items(), key=lambda kv: kv[0][0]):
-        costs = {slug: s.buy for slug, s in sources.items()}
+        costs: dict[str, float | None] = {slug: s.buy for slug, s in sources.items()}
         cheapest: str | None = None
         best: float | None = None
         for slug, s in sources.items():
@@ -218,6 +268,13 @@ def combined_slots(per_source: Mapping[str, Sequence[SourceSlotCost]]) -> list[d
             if best is None or s.buy < best:
                 best = s.buy
                 cheapest = slug
+        for slug, (cost, capacity_kw) in statics.items():
+            costs[slug] = cost
+            if cost is None or capacity_kw <= 0:
+                continue
+            if best is None or cost < best:
+                best = cost
+                cheapest = slug
         result.append(
             {
                 "start": start.isoformat(),
@@ -225,6 +282,7 @@ def combined_slots(per_source: Mapping[str, Sequence[SourceSlotCost]]) -> list[d
                 "costs": costs,
                 "cheapest": cheapest,
                 "estimated": any(s.estimated for s in sources.values()),
+                "partial": bool(expected - set(sources)),
             }
         )
     return result

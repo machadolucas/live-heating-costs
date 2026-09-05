@@ -13,6 +13,7 @@ from datetime import timedelta
 from homeassistant.components.sensor import SensorDeviceClass, SensorEntity, SensorStateClass
 from homeassistant.const import UnitOfPower
 from homeassistant.core import HomeAssistant
+from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
 from homeassistant.util import dt as dt_util
 
@@ -49,6 +50,17 @@ async def async_setup_entry(
             HubCostForecastSensor(coordinator),
         ]
     )
+
+
+def _entity_id_for(hass: HomeAssistant, unique_id: str) -> str | None:
+    """Resolve one of our own sensors' entity id, or ``None`` if not registered.
+
+    The card only ever sees subentry ids in the ranking; handing it the real
+    entity id is what lets a row open HA's more-info dialog. Registration can
+    legitimately be missing (a disabled entity, or a subentry whose platform
+    hasn't been set up yet), so this never raises.
+    """
+    return er.async_get(hass).async_get_entity_id("sensor", DOMAIN, unique_id)
 
 
 def _has_real_horizon_beyond(slots: list[SourceSlotCost], hours: float) -> bool:
@@ -224,6 +236,9 @@ class CheapestSourceSensor(LiveHeatingCostsHubEntity, SensorEntity):
 
         allocated_by_id = {a.subentry_id: a for a in data.allocations}
         demand_kw = data.demand_kw
+        # Not ``self.hass``: the card-contract test builds this sensor directly,
+        # without adding it to hass, so only the coordinator's reference is safe.
+        hass = self.coordinator.hass
         ranking = []
         for snap in data.ranked:
             alloc = allocated_by_id.get(snap.subentry_id)
@@ -250,10 +265,18 @@ class CheapestSourceSensor(LiveHeatingCostsHubEntity, SensorEntity):
                     "heating": snap.source_type == SOURCE_TYPE_CURVE
                     and snap.heating_fraction > 0.05,
                     "measured_blend": snap.measured_cop is not None,
+                    "entity_id": _entity_id_for(hass, f"{snap.subentry_id}_heat_cost"),
                 }
             )
 
-        excluded = [{"name": s.name, "reason": s.unavailable_reason} for s in data.excluded]
+        excluded = [
+            {
+                "name": s.name,
+                "reason": s.unavailable_reason,
+                "entity_id": _entity_id_for(hass, f"{s.subentry_id}_heat_cost"),
+            }
+            for s in data.excluded
+        ]
 
         shortfall_kw: float | None = None
         if demand_kw is not None:
@@ -272,6 +295,9 @@ class CheapestSourceSensor(LiveHeatingCostsHubEntity, SensorEntity):
             ),
             "buy_price_c_per_kwh": (
                 round(data.buy_eur_per_kwh * 100, 3) if data.buy_eur_per_kwh is not None else None
+            ),
+            "demand_entity_id": _entity_id_for(
+                hass, f"{self.coordinator.config_entry.entry_id}_heating_demand"
             ),
         }
 
@@ -391,6 +417,7 @@ class HubCostForecastSensor(LiveHeatingCostsHubEntity, SensorEntity):
                 },
                 "cheapest": item["cheapest"],
                 "estimated": item["estimated"],
+                "partial": item["partial"],
             }
             for item in combined
         ]
