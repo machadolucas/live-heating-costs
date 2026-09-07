@@ -30,6 +30,7 @@ from custom_components.live_heating_costs.const import (
     CONF_POWER_ENTITY,
     CONF_PRESET,
     CONF_PRICE_PER_UNIT,
+    CONF_PUMP_TEMP_ENTITY,
     CONF_SOURCE_TYPE,
     CONF_UA_LEARNING,
     CONF_UA_SEED_W_PER_C,
@@ -128,6 +129,7 @@ def curve_subentry(
     power_entity: str,
     energy_entity: str,
     climate_entity: str | None = None,
+    pump_temp_entity: str | None = None,
 ) -> ConfigSubentryData:
     """A curve (heat pump) source subentry, using a built-in preset."""
     data = {
@@ -139,6 +141,8 @@ def curve_subentry(
     }
     if climate_entity:
         data[CONF_CLIMATE_ENTITY] = climate_entity
+    if pump_temp_entity:
+        data[CONF_PUMP_TEMP_ENTITY] = pump_temp_entity
     return ConfigSubentryData(
         subentry_type=SUBENTRY_TYPE_SOURCE, title=title, unique_id=None, data=data
     )

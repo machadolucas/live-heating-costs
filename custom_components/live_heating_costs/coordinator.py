@@ -20,7 +20,7 @@ from datetime import datetime, timedelta
 
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import STATE_UNAVAILABLE, STATE_UNKNOWN
-from homeassistant.core import Event, EventStateChangedData, HomeAssistant, callback
+from homeassistant.core import CoreState, Event, EventStateChangedData, HomeAssistant, callback
 from homeassistant.helpers.event import (
     async_call_later,
     async_track_state_change_event,
@@ -30,7 +30,7 @@ from homeassistant.helpers.event import (
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator
 from homeassistant.util import dt as dt_util
 
-from . import blend, demand, models, price_source, ua_learner
+from . import blend, demand, models, price_source, temp_source, ua_learner
 from . import forecast as forecast_mod
 from .blend import Sample
 from .const import (
@@ -161,7 +161,7 @@ class _CurveEval:
     """Result of evaluating one curve source's COP/capacity right now."""
 
     temp: float | None
-    temp_source: str  # "pump" | "override" | "hub"
+    temp_source: str | None  # temp_source.TEMP_SOURCE_*; None when unresolved
     modeled_cop: float | None
     capacity_kw: float
     cop: float | None
@@ -244,6 +244,8 @@ class LiveHeatingCostsCoordinator(DataUpdateCoordinator[HubData]):
 
         self._debounce_unsub: Callable[[], None] | None = None
         self._forecast_dirty = True  # force a first build on setup
+        # Entity ids already reported as absent, so the warning fires once each.
+        self._warned_missing: set[str] = set()
 
     # ------------------------------------------------------------------ #
     # Setup
@@ -297,7 +299,9 @@ class LiveHeatingCostsCoordinator(DataUpdateCoordinator[HubData]):
         """Wire the sampling tick, forecast rebuild, daily capture and state watchers."""
         watched: set[str] = set()
         event_mode_entities: set[str] = set()
-        for entity in (self._buy_entity, self._outdoor_temp_entity):
+        # The weather entity is watched too: while the outdoor sensor is down
+        # it *is* the temperature source, so its updates must drive a recompute.
+        for entity in (self._buy_entity, self._outdoor_temp_entity, self._weather_entity):
             if entity:
                 watched.add(entity)
         for entity in (self._day_ahead_entity, self._forecast_price_entity):
@@ -360,17 +364,47 @@ class LiveHeatingCostsCoordinator(DataUpdateCoordinator[HubData]):
     def _float(self, entity_id: str | None) -> float | None:
         return _float_state(self.hass, entity_id)
 
-    def _resolve_temp(self, cfg: CurveSourceConfig) -> tuple[float | None, str]:
-        """Per-source temperature: pump reading -> per-source override -> hub."""
-        if cfg.pump_temp_entity:
-            value = self._float(cfg.pump_temp_entity)
-            if value is not None:
-                return value, "pump"
-        if cfg.temp_entity_override:
-            value = self._float(cfg.temp_entity_override)
-            if value is not None:
-                return value, "override"
-        return self._float(self._outdoor_temp_entity), "hub"
+    def _weather_temp_c(self) -> float | None:
+        """Current temperature reported by the configured weather entity."""
+        if not self._weather_entity:
+            return None
+        state = self.hass.states.get(self._weather_entity)
+        if state is None or state.state in (STATE_UNAVAILABLE, STATE_UNKNOWN, ""):
+            return None
+        return temp_source.weather_temp_c(state.attributes)
+
+    def _resolve_hub_temp(self) -> temp_source.TempReading | None:
+        """Hub-wide outdoor temperature: configured sensor -> weather entity.
+
+        Every consumer of "the outdoor temperature" (degree-hour accumulation,
+        the hub temperature sensor, the forecast anchor) goes through here, so
+        one dead sensor degrades to the weather entity instead of blanking the
+        integration out.
+        """
+        return temp_source.resolve(
+            [
+                (temp_source.TEMP_SOURCE_HUB, self._float(self._outdoor_temp_entity)),
+                (temp_source.TEMP_SOURCE_WEATHER, self._weather_temp_c()),
+            ]
+        )
+
+    def _hub_temp_c(self) -> float | None:
+        reading = self._resolve_hub_temp()
+        return reading.temp_c if reading is not None else None
+
+    def _resolve_temp(self, cfg: CurveSourceConfig) -> tuple[float | None, str | None]:
+        """Per-source temperature: pump -> override -> hub sensor -> weather."""
+        reading = temp_source.resolve(
+            [
+                (temp_source.TEMP_SOURCE_PUMP, self._float(cfg.pump_temp_entity)),
+                (temp_source.TEMP_SOURCE_OVERRIDE, self._float(cfg.temp_entity_override)),
+                (temp_source.TEMP_SOURCE_HUB, self._float(self._outdoor_temp_entity)),
+                (temp_source.TEMP_SOURCE_WEATHER, self._weather_temp_c()),
+            ]
+        )
+        if reading is None:
+            return None, None
+        return reading.temp_c, reading.source
 
     def _recent_samples(self, subentry_id: str, window_min: int) -> list[Sample]:
         dq = self._samples.get(subentry_id)
@@ -539,7 +573,7 @@ class LiveHeatingCostsCoordinator(DataUpdateCoordinator[HubData]):
             blended_cost=blended_cost,
             degree_hours_24h=self._degree_hours_24h(),
             ua_effective=ua_effective,
-            temp_c=self._float(self._outdoor_temp_entity),
+            temp_c=self._hub_temp_c(),
             temp_24h_mean=temp_24h_mean,
             buy_eur_per_kwh=self._buy,
             forecast=self.forecast,
@@ -594,10 +628,61 @@ class LiveHeatingCostsCoordinator(DataUpdateCoordinator[HubData]):
             self.day_accum.per_source_kwh.get(subentry_id, 0.0) + kwh
         )
 
+    def _configured_entities(self) -> list[str]:
+        """Every entity id this hub and its sources were configured to read."""
+        ids = [
+            self._buy_entity,
+            self._day_ahead_entity,
+            self._forecast_price_entity,
+            self._weather_entity,
+            self._outdoor_temp_entity,
+            self._demand_entity,
+        ]
+        for cfg in self.sources.values():
+            if isinstance(cfg, CurveSourceConfig):
+                ids += [
+                    cfg.power_entity,
+                    cfg.energy_entity,
+                    cfg.climate_entity,
+                    cfg.pump_temp_entity,
+                    cfg.temp_entity_override,
+                ]
+            elif isinstance(cfg, DynamicFixedConfig):
+                ids.append(cfg.energy_entity)
+            elif isinstance(cfg, StaticSourceConfig):
+                ids.append(cfg.activity.entity)
+        return [e for e in ids if e]
+
+    def _warn_missing_entities(self) -> None:
+        """Log once per configured entity id that does not exist at all.
+
+        An entity that was renamed or mistyped looks exactly like one that is
+        temporarily unavailable — both just yield ``None`` — so a source can
+        sit at "temperature unavailable" for months with nothing in the log to
+        say why. Absent from the state machine is a different, permanent
+        failure, and it deserves to be said out loud.
+
+        Skipped until HA has finished starting, so an integration that simply
+        has not been set up yet is never mistaken for a missing one.
+        """
+        if self.hass.state is not CoreState.running:
+            return
+        for entity_id in self._configured_entities():
+            if entity_id in self._warned_missing:
+                continue
+            if self.hass.states.get(entity_id) is None:
+                self._warned_missing.add(entity_id)
+                _LOGGER.warning(
+                    "Configured entity %s does not exist; anything depending on it "
+                    "will stay unavailable until the id is corrected",
+                    entity_id,
+                )
+
     @callback
     def _handle_sampling_tick(self, _now: datetime) -> None:
         now = dt_util.utcnow()
-        hub_temp = self._float(self._outdoor_temp_entity)
+        self._warn_missing_entities()
+        hub_temp = self._hub_temp_c()
         if hub_temp is not None:
             self._temp_history.append((now, hub_temp))
             deficit = max(self._base_temp - hub_temp, 0.0)
@@ -762,7 +847,7 @@ class LiveHeatingCostsCoordinator(DataUpdateCoordinator[HubData]):
         # The hourly forecast's first point is the *next* full hour; anchoring
         # it with the measured outdoor temperature keeps curve sources priced
         # from now on instead of dropping out of the leading slots.
-        temps = forecast_mod.anchor_temps(temps, now, self._float(self._outdoor_temp_entity))
+        temps = forecast_mod.anchor_temps(temps, now, self._hub_temp_c())
 
         forecast: dict[str, list[SourceSlotCost]] = {}
         static_costs: dict[str, tuple[float | None, float]] = {}

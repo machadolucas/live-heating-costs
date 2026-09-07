@@ -37,6 +37,7 @@ to make that bug structurally impossible — see the engine contract below.
 | `ua_learner.py` | UA (heat-loss coefficient) EWMA learning: seed, quality gates, clamp, shadow MAE | no |
 | `forecast.py` | Per-source, per-slot delivered-heat cost projection from prices + weather | no |
 | `price_source.py` | Normalise heterogeneous price-forecast entities → UTC `ForecastSlot`s | no |
+| `temp_source.py` | Outdoor-temperature fallback chain (pump → override → hub → weather) | no |
 | `cost_engine.py` | `SourceSnapshot`, `electric_cost`/`wood_cost_eur_per_kwh`, `rank`, `merit_order` | no |
 | `models.py` | Subentry `data` mapping → typed `SourceConfig` variant, validated | no |
 | `coordinator.py` | Sampling tick, snapshot build, debounced recompute, forecast rebuild, daily capture | yes |
@@ -98,6 +99,27 @@ to make that bug structurally impossible — see the engine contract below.
   rather than implying the missing source was priced out. A fuel-price
   override edit now also triggers an immediate forecast rebuild (previously
   it waited for the next 15-min tick), since the static line depends on it.
+- **Outdoor temperature falls back, cost never does** (`temp_source.py`): a
+  curve source resolves `pump reading -> per-source override -> hub sensor ->
+  weather entity`; the hub's own temperature (degree-hour accumulation, the
+  hub `temp_c`, `forecast.anchor_temps`) resolves the last two links. This is
+  *not* a hole in the None-propagation rule above: every link is a real
+  measurement of the same physical quantity, the winning one is published as
+  the `temp_source` attribute, and when all links fail the result is still
+  `None` — the source is still excluded with `temp_unavailable`, never priced
+  at a guessed temperature. `PLAUSIBLE_TEMP_RANGE_C` (-90..60 °C) rejects
+  sentinels like -999 and unconverted Kelvin; a weather entity reporting °F is
+  converted. The weather entity is in the coordinator's watched set precisely
+  because it *is* the temperature source while the sensor is down. Motivation:
+  one flat RuuviTag battery took out every heat pump's COP and stalled
+  degree-hour accumulation — and a *partial* stall is the dangerous case,
+  since a day keeps its full `delivered_kwh` against half its degree-hours and
+  teaches the UA learner roughly double the true coefficient.
+- **Missing entity ids are logged, not just silent**: `_warn_missing_entities`
+  (first sampling tick onward, once per id) warns for any configured entity
+  that is absent from the state machine. A renamed or mistyped id otherwise
+  looks exactly like a temporarily unavailable one — both just yield `None` —
+  so a source could sit unavailable for months with nothing in the log.
 - **Entity-id attributes, never parsed client-side**: `sensor.py` resolves
   each row's own sensor's entity id from the entity registry (unique id
   `{subentry_id}_heat_cost`, `{entry_id}_heating_demand`) and publishes it as
@@ -153,9 +175,10 @@ uv pip install --python .venv313/bin/python -r requirements_test.txt
 ```
 
 Pure-module tests (`tests/test_*.py`: curves, cost_engine, blend, demand,
-ua_learner, forecast, price_source, models) import their module directly and
-need only `pytest` — no `hass` fixture, no Home Assistant install. Keep those
-modules HA-free; if a change needs `hass`, it belongs in `tests/ha/` instead.
+ua_learner, forecast, price_source, temp_source, models) import their module
+directly and need only `pytest` — no `hass` fixture, no Home Assistant
+install. Keep those modules HA-free; if a change needs `hass`, it belongs in
+`tests/ha/` instead.
 
 ## Testing conventions
 

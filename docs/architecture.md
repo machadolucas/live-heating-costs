@@ -25,6 +25,8 @@ forecast-price entity ──┤ price_source       │
 weather entity (hourly) ─── coordinator._async_weather_temps (cached 30 min)
                          │                    │
 outdoor temp sensor ─────┼────────────────────┤
+  (+ weather fallback,   │                    │
+   temp_source.resolve)  │                    │
 pump power/energy, ──────┤                    │
   climate.hvac_action    │                    │
 Shelly/energy counters ──┤                    │
@@ -86,6 +88,7 @@ Forecast rebuild (every 15 min, or on price-entity state change, debounced):
 | `ua_learner.py` | `DailyRow`/`UaState`, `make_row`, `ingest` (EWMA + clamp), `effective_ua`, shadow MAE | no |
 | `forecast.py` | `TempPoint`, `SourceSlotCost`, `build_source_forecast`, `combined_slots` | no |
 | `price_source.py` | Auto-detect + normalize heterogeneous price-entity attribute layouts → UTC `ForecastSlot`s | no |
+| `temp_source.py` | Outdoor-temperature fallback chain (`resolve`) + weather-attribute parsing (`weather_temp_c`) | no |
 | `cost_engine.py` | `SourceSnapshot`, `electric_cost`, `wood_cost_eur_per_kwh`, `rank`, `merit_order`, `Allocation` | no |
 | `models.py` | Subentry `data` → `StaticSourceConfig` / `DynamicFixedConfig` / `CurveSourceConfig` | no |
 | `coordinator.py` | Sampling tick, day accumulator, snapshot build, debounced recompute, forecast rebuild, daily capture | yes |
@@ -146,6 +149,19 @@ Forecast rebuild (every 15 min, or on price-entity state change, debounced):
   `fuel_price_overrides`, and `last_event_ts` (per-source, for event-mode
   debounce). Saves are debounced 10 s (`SAVE_DELAY_S`) via
   `Store.async_delay_save`, flushed immediately on unload.
+- **Outdoor temperature is a chain, not one entity** (`temp_source.py`): a
+  curve source resolves `pump reading -> per-source override -> hub sensor ->
+  weather entity`, and the hub's own temperature (degree-hour accumulation,
+  the hub temperature sensor, `forecast.anchor_temps`) resolves the last two.
+  Every link is a real measurement of the same quantity and the winner is
+  published as the `temp_source` attribute, so nothing is invented — when all
+  links fail the answer is still `None` and the source is still excluded with
+  `temp_unavailable`. Readings outside `PLAUSIBLE_TEMP_RANGE_C` (-90..60 °C)
+  are rejected as sentinels, and a weather entity reporting °F is converted.
+  Without the weather link a single flat sensor battery blanked out every heat
+  pump *and* stalled degree-hour accumulation, which is worse than it sounds:
+  a half-day gap keeps the day's full `delivered_kwh` against half its
+  degree-hours, teaching the UA learner roughly double the true coefficient.
 - **Market-day / tomorrow-prices honesty**: `has_tomorrow` on both the
   per-source and the hub forecast sensor means "the *real* (non-estimated)
   price horizon extends more than 12 h beyond now" — it says nothing about
