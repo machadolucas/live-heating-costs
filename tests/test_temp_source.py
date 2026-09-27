@@ -122,3 +122,28 @@ def test_resolve_returns_none_when_every_link_is_unusable() -> None:
 
 def test_resolve_on_an_empty_chain_is_none() -> None:
     assert ts.resolve([]) is None
+
+
+# --------------------------------------------------------------------------- #
+# to_celsius
+# --------------------------------------------------------------------------- #
+
+
+@pytest.mark.parametrize(
+    ("value", "unit", "expected"),
+    [
+        (23.0, "°F", -5.0),
+        (32.0, "F", 0.0),
+        (263.15, "K", -10.0),
+        (-3.5, "°C", -3.5),
+        (-3.5, None, -3.5),
+        (-3.5, "furlongs", -3.5),
+        (-3.5, 7, -3.5),
+    ],
+)
+def test_to_celsius(value, unit, expected) -> None:
+    assert ts.to_celsius(value, unit) == pytest.approx(expected)
+
+
+def test_to_celsius_none_value_stays_none() -> None:
+    assert ts.to_celsius(None, "°F") is None

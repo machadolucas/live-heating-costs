@@ -152,3 +152,212 @@ def test_normalises_to_utc_across_dst_spring_forward():
     assert all(s.start.utcoffset() == timedelta(0) for s in slots)  # all UTC now
     gaps = [b.start - a.start for a, b in zip(slots, slots[1:], strict=False)]
     assert all(g == timedelta(minutes=15) for g in gaps)
+
+
+# --------------------------------------------------------------------------- #
+# units: unit_scale, key-implied cents, entity unit_of_measurement
+# --------------------------------------------------------------------------- #
+
+
+@pytest.mark.parametrize(
+    ("unit", "scale"),
+    [
+        ("€/kWh", 1.0),
+        ("EUR/kWh", 1.0),
+        ("c/kWh", 0.01),
+        ("snt/kWh", 0.01),
+        ("ct / kWh", 0.01),
+        ("EUR/MWh", 0.001),
+        ("€/MWh", 0.001),
+        (None, 1.0),
+        ("", 1.0),
+        ("bananas", 1.0),
+        (42, 1.0),
+    ],
+)
+def test_unit_scale(unit, scale):
+    assert ps.unit_scale(unit) == pytest.approx(scale)
+
+
+class _State:
+    def __init__(self, attributes: dict) -> None:
+        self.attributes = attributes
+
+
+def _hourly(key: str, values: list[float]) -> list[dict]:
+    t0 = datetime(2026, 1, 1, 0, 0, tzinfo=UTC)
+    return [{"start": (t0 + timedelta(hours=i)).isoformat(), key: v} for i, v in enumerate(values)]
+
+
+def test_price_ct_per_kwh_key_is_cents():
+    slots = ps.normalize({"prices": _hourly("price_ct_per_kwh", [12.0, 5.0])})
+    assert [s.buy for s in slots] == pytest.approx([0.12, 0.05])
+
+
+def test_slots_from_state_applies_entity_unit():
+    state = _State({"prices": _hourly("price", [12.0]), "unit_of_measurement": "c/kWh"})
+    assert ps.slots_from_state(state)[0].buy == pytest.approx(0.12)
+    state = _State({"prices": _hourly("price", [120.0]), "unit_of_measurement": "EUR/MWh"})
+    assert ps.slots_from_state(state)[0].buy == pytest.approx(0.12)
+
+
+def test_slots_from_state_scales_sell_too():
+    t0 = datetime(2026, 1, 1, 0, 0, tzinfo=UTC)
+    items = [{"start": t0.isoformat(), "buy": 20.0, "sell": 4.0}]
+    state = _State({"data_today": items, "unit_of_measurement": "c/kWh"})
+    slot = ps.slots_from_state(state)[0]
+    assert slot.buy == pytest.approx(0.20)
+    assert slot.sell == pytest.approx(0.04)
+
+
+def test_ct_key_ignores_entity_unit_no_double_scale():
+    state = _State({"prices": _hourly("price_ct_per_kwh", [12.0]), "unit_of_measurement": "c/kWh"})
+    assert ps.slots_from_state(state)[0].buy == pytest.approx(0.12)
+
+
+def test_slots_from_state_without_unit_is_eur():
+    state = _State({"prices": _hourly("price", [0.12])})
+    assert ps.slots_from_state(state)[0].buy == pytest.approx(0.12)
+
+
+# --------------------------------------------------------------------------- #
+# robustness: bad rows are dropped, everything else is PriceFormatError
+# --------------------------------------------------------------------------- #
+
+
+def test_rows_with_missing_or_bad_buy_are_skipped():
+    t0 = datetime(2026, 1, 1, 0, 0, tzinfo=UTC)
+    prices = [
+        {"time": (t0 + timedelta(hours=i)).isoformat(), "price": v}
+        for i, v in enumerate([0.1, None, "n/a", float("nan"), float("inf"), 0.2])
+    ]
+    slots = ps.normalize({"prices": prices})
+    assert [s.buy for s in slots] == pytest.approx([0.1, 0.2])
+    assert slots[1].start == t0 + timedelta(hours=5)
+
+
+def test_rows_with_missing_or_invalid_start_are_skipped():
+    t0 = datetime(2026, 1, 1, 0, 0, tzinfo=UTC)
+    prices = [
+        {"time": t0.isoformat(), "price": 0.1},
+        {"price": 0.5},  # no start key
+        {"time": "not a timestamp", "price": 0.6},
+        {"time": "2026-01-01T02:00:00", "price": 0.7},  # naive
+        {"time": 12345, "price": 0.8},
+        "not even a dict",
+        {"time": (t0 + timedelta(hours=1)).isoformat(), "price": 0.2},
+    ]
+    slots = ps.normalize({"prices": prices})
+    assert [s.buy for s in slots] == pytest.approx([0.1, 0.2])
+
+
+def test_all_rows_unusable_raises_price_format_error():
+    with pytest.raises(ps.PriceFormatError):
+        ps.normalize({"prices": [{"time": "garbage", "price": 1.0}, {"time": None, "price": 2}]})
+    with pytest.raises(ps.PriceFormatError):
+        ps.normalize({"prices": [{"time": "2026-01-01T00:00:00+00:00", "price": None}]})
+
+
+@pytest.mark.parametrize(
+    "attributes",
+    [None, 5, "prices", {"prices": "oops"}, {"prices": [1, 2]}, {"raw_today": [{"foo": 1}]}],
+)
+def test_malformed_payloads_only_raise_price_format_error(attributes):
+    with pytest.raises(ps.PriceFormatError):
+        ps.normalize(attributes)
+
+
+def test_non_list_tomorrow_is_ignored():
+    t0 = datetime(2026, 1, 1, 0, 0, tzinfo=UTC)
+    today = [{"start": t0, "end": t0 + timedelta(hours=1), "value": 1.0}]
+    slots = ps.normalize({"raw_today": today, "raw_tomorrow": None})
+    assert len(slots) == 1
+    slots = ps.normalize({"raw_today": today, "raw_tomorrow": "unavailable"})
+    assert len(slots) == 1
+
+
+def test_unsorted_rows_infer_ends_in_time_order():
+    t0 = datetime(2026, 1, 1, 0, 0, tzinfo=UTC)
+    order = [2, 0, 3, 1]
+    prices = [{"time": (t0 + timedelta(hours=i)).isoformat(), "price": float(i)} for i in order]
+    slots = ps.normalize({"prices": prices})
+    assert [s.buy for s in slots] == [0.0, 1.0, 2.0, 3.0]
+    for s in slots:
+        assert s.end - s.start == timedelta(hours=1)
+
+
+def test_duplicate_start_does_not_poison_end_inference():
+    # Dedupe must run before end inference: a duplicate start would otherwise
+    # hand its twin a zero-length slot (end = the "next" start = its own start).
+    t0 = datetime(2026, 1, 1, 0, 0, tzinfo=UTC)
+    prices = [
+        {"time": t0.isoformat(), "price": 1.0},
+        {"time": t0.isoformat(), "price": 9.0},
+        {"time": (t0 + timedelta(hours=1)).isoformat(), "price": 2.0},
+    ]
+    slots = ps.normalize({"prices": prices})
+    assert [s.buy for s in slots] == [1.0, 2.0]
+    assert slots[0].end == t0 + timedelta(hours=1)
+
+
+def test_explicit_end_not_after_start_is_dropped():
+    t0 = datetime(2026, 1, 1, 0, 0, tzinfo=UTC)
+    today = [
+        {"start": t0, "end": t0 + timedelta(hours=1), "value": 1.0},
+        {"start": t0 + timedelta(hours=1), "end": t0 + timedelta(hours=1), "value": 2.0},
+        {"start": t0 + timedelta(hours=2), "end": t0 + timedelta(hours=1), "value": 3.0},
+        {"start": t0 + timedelta(hours=3), "end": t0 + timedelta(hours=4), "value": 4.0},
+    ]
+    slots = ps.normalize({"raw_today": today})
+    assert [s.buy for s in slots] == [1.0, 4.0]
+
+
+def test_bad_sell_becomes_none_row_kept():
+    t0 = datetime(2026, 1, 1, 0, 0, tzinfo=UTC)
+    items = [{"start": t0, "end": t0 + timedelta(hours=1), "buy": 0.1, "sell": "n/a"}]
+    slots = ps.normalize({"data_today": items})
+    assert slots[0].sell is None
+    assert slots[0].buy == pytest.approx(0.1)
+
+
+def test_unpriced_row_still_bounds_the_previous_slot():
+    # 01:00 has no price yet: 00:00's slot must end at 01:00 (not stretch to
+    # 02:00 at 00:00's price), and the unknown hour is simply absent.
+    t0 = datetime(2026, 7, 8, 0, 0, tzinfo=UTC)
+    attrs = {
+        "prices": [
+            {"time": t0.isoformat(), "price": 0.10},
+            {"time": (t0 + timedelta(hours=1)).isoformat(), "price": None},
+            {"time": (t0 + timedelta(hours=2)).isoformat(), "price": 0.30},
+        ]
+    }
+    slots = ps.normalize(attrs)
+    assert [(s.start, s.end, s.buy) for s in slots] == [
+        (t0, t0 + timedelta(hours=1), 0.10),
+        (t0 + timedelta(hours=2), t0 + timedelta(hours=3), 0.30),
+    ]
+
+
+def test_priced_duplicate_beats_unpriced_one():
+    t0 = datetime(2026, 7, 8, 0, 0, tzinfo=UTC)
+    attrs = {
+        "prices": [
+            {"time": t0.isoformat(), "price": None},
+            {"time": t0.isoformat(), "price": 0.12},
+        ]
+    }
+    assert [s.buy for s in ps.normalize(attrs)] == [0.12]
+
+
+@pytest.mark.parametrize("first", [None, {"time": "x"}, {"price": 0.1}])
+def test_malformed_first_row_does_not_break_format_detection(first):
+    t0 = datetime(2026, 7, 8, 0, 0, tzinfo=UTC)
+    attrs = {"prices": [first, {"time": t0.isoformat(), "price": 0.12}]}
+    slots = ps.normalize(attrs)
+    assert [(s.start, s.buy) for s in slots] == [(t0, 0.12)]
+
+
+def test_empty_today_with_tomorrow_rows_still_parses():
+    t0 = datetime(2026, 7, 9, 0, 0, tzinfo=UTC)
+    attrs = {"raw_today": [], "raw_tomorrow": [{"start": t0.isoformat(), "value": 0.2}]}
+    assert [(s.start, s.buy) for s in ps.normalize(attrs)] == [(t0, 0.2)]

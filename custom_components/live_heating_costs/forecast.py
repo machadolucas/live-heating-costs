@@ -13,6 +13,7 @@ are timezone-aware; naive input raises ``ValueError``.
 
 from __future__ import annotations
 
+from bisect import bisect_left
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime, timedelta
@@ -52,6 +53,35 @@ def _require_aware(value: datetime, label: str) -> None:
         raise ValueError(f"{label} is not timezone-aware: {value!r}")
 
 
+@dataclass(frozen=True)
+class _SortedTemps:
+    """A temperature series sorted once, for repeated bisect lookups.
+
+    :func:`build_source_forecast` interpolates once per slot per source (~200
+    slots x every curve source); re-sorting and linearly scanning the series
+    on each of those calls was quadratic for no reason.
+    """
+
+    ts: tuple[datetime, ...]
+    temps: tuple[float, ...]
+
+    @classmethod
+    def of(cls, points: Sequence[TempPoint]) -> _SortedTemps:
+        pts = sorted(points, key=lambda p: p.ts)  # stable: ties keep input order
+        return cls(ts=tuple(p.ts for p in pts), temps=tuple(p.temp_c for p in pts))
+
+    def at(self, t: datetime) -> float | None:
+        ts = self.ts
+        if not ts or t < ts[0] or t > ts[-1]:
+            return None
+        i = bisect_left(ts, t)
+        if ts[i] == t:
+            return self.temps[i]  # on a knot (the first, if duplicated)
+        a, b = i - 1, i  # ts[a] < t < ts[b], guaranteed by the bounds check
+        frac = (t - ts[a]).total_seconds() / (ts[b] - ts[a]).total_seconds()
+        return self.temps[a] + frac * (self.temps[b] - self.temps[a])
+
+
 def interp_temp(points: Sequence[TempPoint], t: datetime) -> float | None:
     """Linearly interpolate the forecast temperature at ``t``.
 
@@ -60,18 +90,7 @@ def interp_temp(points: Sequence[TempPoint], t: datetime) -> float | None:
     extrapolation, since a modeled COP/capacity that far beyond the weather
     forecast's horizon would be fabricated. Points are sorted defensively.
     """
-    if not points:
-        return None
-    pts = sorted(points, key=lambda p: p.ts)
-    if t < pts[0].ts or t > pts[-1].ts:
-        return None
-    for a, b in zip(pts, pts[1:], strict=False):
-        if a.ts <= t <= b.ts:
-            if b.ts == a.ts:
-                return a.temp_c
-            frac = (t - a.ts).total_seconds() / (b.ts - a.ts).total_seconds()
-            return a.temp_c + frac * (b.temp_c - a.temp_c)
-    return pts[-1].temp_c  # t exactly equals the last point's timestamp
+    return _SortedTemps.of(points).at(t)
 
 
 def anchor_temps(
@@ -122,6 +141,8 @@ def build_source_forecast(
     fixed_cop: float | None,
     fixed_capacity_kw: float | None,
     operating_limit_c: float | None,
+    min_cop: float | None = None,
+    max_cop: float | None = None,
 ) -> list[SourceSlotCost]:
     """Build one source's per-slot cost forecast over ``[now, now + horizon_h)``.
 
@@ -129,11 +150,18 @@ def build_source_forecast(
     ``SOURCE_TYPE_DYNAMIC_FIXED`` in ``const.py``):
 
     * **curve** (``cop_at`` given): COP/capacity depend on the slot's
-      interpolated temperature. A slot whose midpoint temperature can't be
-      interpolated (beyond the weather forecast's horizon) is *skipped
-      entirely* — there's nothing honest to say about it. A slot at or below
-      ``operating_limit_c`` is *kept* but priced as unavailable
-      (``buy=None``, ``cop=None``, ``capacity_kw=0.0``).
+      interpolated temperature, taken at the midpoint of the slot's
+      *remaining* part ``[max(start, now), end]``. For the in-progress slot
+      that keeps the evaluation point inside the series :func:`anchor_temps`
+      starts at ``now`` — the full-slot midpoint lies in the past once ``now``
+      passes it, which used to drop the heat pump from the current slot. A
+      slot whose temperature can't be interpolated (beyond the weather
+      forecast's horizon) is *skipped entirely* — there's nothing honest to
+      say about it. A slot below ``operating_limit_c`` is *kept* but priced
+      as unavailable (``buy=None``, ``cop=None``, ``capacity_kw=0.0``).
+      ``min_cop``/``max_cop`` clamp the modeled COP exactly as
+      :func:`blend.blend_cop` clamps the live one, so a custom curve with
+      points outside those bounds forecasts the same COP it reports live.
     * **fixed** (``fixed_cop`` given): constant COP/capacity, temperature
       irrelevant — every slot in the window is priced, never skipped.
 
@@ -160,11 +188,13 @@ def build_source_forecast(
     if cop_at is None and fixed_cop is None:
         raise ValueError("build_source_forecast requires either cop_at or fixed_cop")
 
+    series = _SortedTemps.of(temps)
     out: list[SourceSlotCost] = []
     for slot, estimated in tagged:
-        midpoint = slot.start + (slot.end - slot.start) / 2
+        eval_start = max(slot.start, now)  # every slot here has end > now
+        midpoint = eval_start + (slot.end - eval_start) / 2
         if cop_at is not None:
-            temp = interp_temp(temps, midpoint)
+            temp = series.at(midpoint)
             if temp is None:
                 continue  # no weather forecast that far out for a curve source
             if operating_limit_c is not None and temp < operating_limit_c:
@@ -180,12 +210,17 @@ def build_source_forecast(
                 )
                 continue
             cop = cop_at(temp)
+            if min_cop is not None:
+                cop = max(min_cop, cop)
+            if max_cop is not None:
+                cop = min(max_cop, cop)
             capacity_kw = capacity_at(temp) if capacity_at is not None else 0.0
-            buy = slot.buy / cop if cop else None
         else:
             cop = fixed_cop
             capacity_kw = fixed_capacity_kw if fixed_capacity_kw is not None else 0.0
-            buy = slot.buy / cop if cop else None
+        # Same rule as cost_engine.electric_cost: a non-positive COP is unknown,
+        # never "free" or negative-cost heat.
+        buy = slot.buy / cop if cop is not None and cop > 0 else None
         out.append(
             SourceSlotCost(
                 start=slot.start,

@@ -58,7 +58,8 @@ class WindowCop:
     """Result of reconciling a window of samples into a measured COP.
 
     ``measured_cop`` is ``None`` when the window is unusable: too little
-    metered energy, a counter reset, or fewer than 2 usable samples.
+    metered energy, a counter reset, fewer than 2 usable samples, or a
+    heating segment whose temperature (hence modeled heat) is unknown.
     """
 
     measured_cop: float | None
@@ -96,6 +97,12 @@ def window_cop(
     the *leading* sample's activity/temperature is used to attribute that
     segment's energy delta — a reasonable approximation at the ~1-minute
     sampling granularity this is designed for.
+
+    Zero numerator is only right for energy *known* not to make heat
+    (defrost/standby). Energy spent heating at an unknown temperature is heat
+    we just can't quantify; counting it as zero would read as a spurious COP
+    collapse, so such a window yields no measurement at all and the blend
+    falls back to the modeled COP.
     """
     ordered = sorted(samples, key=lambda s: s.ts)
     if len(ordered) < 2:
@@ -106,6 +113,7 @@ def window_cop(
     numerator = 0.0
     total_delta_e = 0.0
     counter_reset = False
+    unquantified_heat = False
 
     for a, b in zip(ordered, ordered[1:], strict=False):
         seg_seconds = (b.ts - a.ts).total_seconds()
@@ -121,14 +129,17 @@ def window_cop(
             counter_reset = True
             continue
         total_delta_e += delta_e
-        if delta_e > 0 and a.temp_c is not None and is_producing_heat(a, standby_w):
-            numerator += cop_at(a.temp_c) * delta_e
+        if delta_e > 0 and is_producing_heat(a, standby_w):
+            if a.temp_c is None:
+                unquantified_heat = True
+            else:
+                numerator += cop_at(a.temp_c) * delta_e
 
     heating_fraction = active_seconds / total_seconds if total_seconds > 0 else 0.0
 
     if counter_reset:
         return WindowCop(measured_cop=None, heating_fraction=heating_fraction, energy_kwh=0.0)
-    if total_delta_e < min_energy_kwh:
+    if unquantified_heat or total_delta_e < min_energy_kwh:
         return WindowCop(
             measured_cop=None, heating_fraction=heating_fraction, energy_kwh=total_delta_e
         )

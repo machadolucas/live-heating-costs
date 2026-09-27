@@ -111,7 +111,7 @@
           "data_description": {
             "fuel_unit": "The unit the price is quoted per: cubic metres of stacked wood, kilograms, or kWh directly.",
             "price_per_unit_eur": "What you pay per unit of fuel, in euro.",
-            "energy_density_kwh_per_unit": "Energy content of one unit of fuel. Suggested default is 1700 kWh/m³ for stacked birch — adjust for your wood/fuel and unit.",
+            "energy_density_kwh_per_unit": "Energy content of one unit of fuel. Leave blank to use the default for the chosen fuel unit (birch: 1700 kWh per stacked m³, 1000 per loose m³, 4.1 per kg; 1 for kWh) — adjust for your wood/fuel.",
             "efficiency": "Fraction of the fuel's energy that ends up as delivered heat (stove + flue losses).",
             "capacity_kw": "Maximum heat output. Set to 0 for a source that contributes heat but is never dispatched (e.g. a wood sauna) — it's still counted for cost/UA learning.",
             "activity_mode": "None = no on/off detection (a constant background contributor). Duration = integrate a known output while the activity sensor is on. Event = credit a fixed amount of energy each time the activity sensor switches on, useful for a sauna heated in distinct sessions.",

@@ -8,7 +8,7 @@ to 2 decimals; attribute costs (c/kWh) to 3 decimals.
 
 from __future__ import annotations
 
-from datetime import timedelta
+from datetime import datetime, timedelta
 
 from homeassistant.components.sensor import SensorDeviceClass, SensorEntity, SensorStateClass
 from homeassistant.const import UnitOfPower
@@ -52,6 +52,14 @@ async def async_setup_entry(
     )
 
 
+# The displayed cost unit, shared by every c/kWh sensor (live and forecast).
+_COST_UNIT = "c/kWh"
+
+
+def _r(value: float | None, digits: int) -> float | None:
+    return round(value, digits) if value is not None else None
+
+
 def _entity_id_for(hass: HomeAssistant, unique_id: str) -> str | None:
     """Resolve one of our own sensors' entity id, or ``None`` if not registered.
 
@@ -79,7 +87,7 @@ def _has_real_horizon_beyond(slots: list[SourceSlotCost], hours: float) -> bool:
 class SourceHeatCostSensor(LiveHeatingCostsEntity, SensorEntity):
     """This source's live delivered-heat cost, c/kWh."""
 
-    _attr_native_unit_of_measurement = "c/kWh"
+    _attr_native_unit_of_measurement = _COST_UNIT
     _attr_state_class = SensorStateClass.MEASUREMENT
     _attr_icon = "mdi:currency-eur"
 
@@ -103,7 +111,9 @@ class SourceHeatCostSensor(LiveHeatingCostsEntity, SensorEntity):
         if snap is None:
             return {}
         return {
-            "cost_eur_per_kwh": snap.cost_eur_per_kwh,
+            # Rounded (0.001 c/kWh): the raw float differs in its last digits
+            # on nearly every tick, and each difference is a recorder row.
+            "cost_eur_per_kwh": _r(snap.cost_eur_per_kwh, 5),
             "unavailable_reason": snap.unavailable_reason,
             "source_type": snap.source_type,
         }
@@ -137,6 +147,12 @@ class SourceCopSensor(LiveHeatingCostsEntity, SensorEntity):
 
     _attr_state_class = SensorStateClass.MEASUREMENT
     _attr_icon = "mdi:sine-wave"
+    # These move on every 60 s tick (the blend window slides); recording them
+    # would write a state row per source per minute. The rounded COP state is
+    # the long-term record; the live attributes stay visible in more-info.
+    _unrecorded_attributes = frozenset(
+        {"modeled_cop", "measured_cop", "heating_fraction", "window_energy_kwh"}
+    )
 
     def __init__(self, coordinator: LiveHeatingCostsCoordinator, subentry_id: str) -> None:
         super().__init__(coordinator, subentry_id, "cop")
@@ -159,23 +175,36 @@ class SourceCopSensor(LiveHeatingCostsEntity, SensorEntity):
             return {}
         meta = self.source_meta
         return {
-            "modeled_cop": snap.modeled_cop,
-            "measured_cop": snap.measured_cop,
-            "heating_fraction": snap.heating_fraction,
-            "temp_used_c": meta.get("temp_used_c"),
+            "modeled_cop": _r(snap.modeled_cop, 3),
+            "measured_cop": _r(snap.measured_cop, 3),
+            "heating_fraction": _r(snap.heating_fraction, 3),
+            "temp_used_c": _r(meta.get("temp_used_c"), 2),
             "temp_source": meta.get("temp_source"),
-            "window_energy_kwh": meta.get("window_energy_kwh"),
+            "window_energy_kwh": _r(meta.get("window_energy_kwh"), 4),
         }
 
 
 class SourceCostForecastSensor(LiveHeatingCostsEntity, SensorEntity):
-    """This source's projected delivered-heat cost, 24-48h ahead."""
+    """This source's projected delivered-heat cost, 24-48h ahead.
 
+    State = the cost of the slot containing *now* (same unit as the live
+    cost sensor); attributes = the whole projection.
+    """
+
+    # Deliberately unit-less: existing installs recorded statistics without a
+    # unit (adding one now raises a units-changed repair), and the forecast
+    # attribute is in EUR/kWh, so a c/kWh unit would make price_source scale
+    # it a second time if this sensor is fed back in as a price forecast.
     _attr_state_class = SensorStateClass.MEASUREMENT
     _unrecorded_attributes = frozenset({"forecast", "horizon_end", "has_tomorrow", "updated"})
 
     def __init__(self, coordinator: LiveHeatingCostsCoordinator, subentry_id: str) -> None:
         super().__init__(coordinator, subentry_id, "cost_forecast")
+        # The coordinator republishes every minute but the forecast only
+        # changes on a rebuild, so the (large) attribute list is rebuilt only
+        # when ``forecast_updated`` moves.
+        self._attr_cache_key: datetime | None = None
+        self._attr_cache: list[dict] = []
 
     @property
     def available(self) -> bool:
@@ -189,10 +218,13 @@ class SourceCostForecastSensor(LiveHeatingCostsEntity, SensorEntity):
 
     @property
     def native_value(self) -> float | None:
-        slots = self._slots()
-        if not slots or slots[0].buy is None:
+        # The slot containing now, not slots[0]: between rebuilds the first
+        # slot can already be in the past.
+        now = dt_util.utcnow()
+        current = next((s for s in self._slots() if s.start <= now < s.end), None)
+        if current is None or current.buy is None:
             return None
-        return round(slots[0].buy * 100, 2)
+        return round(current.buy * 100, 2)
 
     @property
     def extra_state_attributes(self) -> dict:
@@ -200,8 +232,11 @@ class SourceCostForecastSensor(LiveHeatingCostsEntity, SensorEntity):
         if data is None:
             return {}
         slots = self._slots()
+        if self._attr_cache_key is None or self._attr_cache_key != data.forecast_updated:
+            self._attr_cache = forecast_attr_list(slots)
+            self._attr_cache_key = data.forecast_updated
         return {
-            "forecast": forecast_attr_list(slots),
+            "forecast": self._attr_cache,
             "horizon_end": slots[-1].end.isoformat() if slots else None,
             "has_tomorrow": _has_real_horizon_beyond(slots, 12),
             "updated": data.forecast_updated.isoformat() if data.forecast_updated else None,
@@ -272,6 +307,9 @@ class CheapestSourceSensor(LiveHeatingCostsHubEntity, SensorEntity):
         excluded = [
             {
                 "name": s.name,
+                # The card keys its colours and legend chips by subentry id,
+                # for excluded sources as much as ranked ones.
+                "subentry_id": s.subentry_id,
                 "reason": s.unavailable_reason,
                 "entity_id": _entity_id_for(hass, f"{s.subentry_id}_heat_cost"),
             }
@@ -382,6 +420,11 @@ class HubCostForecastSensor(LiveHeatingCostsHubEntity, SensorEntity):
 
     def __init__(self, coordinator: LiveHeatingCostsCoordinator) -> None:
         super().__init__(coordinator, "cost_forecast")
+        # Rebuilt only when the forecast itself changes (see
+        # SourceCostForecastSensor): (key, slots, latest real slot end).
+        self._attr_cache_key: datetime | None = None
+        self._attr_cache: list[dict] = []
+        self._real_end_cache: datetime | None = None
 
     @property
     def native_value(self) -> str | None:
@@ -390,24 +433,20 @@ class HubCostForecastSensor(LiveHeatingCostsHubEntity, SensorEntity):
             return None
         return data.forecast_updated.isoformat()
 
-    def _has_tomorrow(self, combined: list[dict]) -> bool:
-        now = dt_util.utcnow()
+    @staticmethod
+    def _latest_real_end(combined: list[dict]) -> datetime | None:
         real_ends = [
             end
             for item in combined
             if not item["estimated"] and (end := dt_util.parse_datetime(item["end"])) is not None
         ]
-        if not real_ends:
-            return False
-        return (max(real_ends) - now) > timedelta(hours=12)
+        return max(real_ends) if real_ends else None
 
-    @property
-    def extra_state_attributes(self) -> dict:
-        data = self.coordinator.data
-        if data is None:
-            return {}
+    def _refresh_cache(self, data: HubData) -> None:
+        if self._attr_cache_key is not None and self._attr_cache_key == data.forecast_updated:
+            return
         combined = data.forecast_combined
-        slots = [
+        self._attr_cache = [
             {
                 "start": item["start"],
                 "end": item["end"],
@@ -421,11 +460,24 @@ class HubCostForecastSensor(LiveHeatingCostsHubEntity, SensorEntity):
             }
             for item in combined
         ]
+        self._real_end_cache = self._latest_real_end(combined)
+        self._attr_cache_key = data.forecast_updated
+
+    @property
+    def extra_state_attributes(self) -> dict:
+        data = self.coordinator.data
+        if data is None:
+            return {}
+        self._refresh_cache(data)
+        combined = data.forecast_combined
         names = {sid: cfg.name for sid, cfg in self.coordinator.sources.items()}
+        real_end = self._real_end_cache
         return {
             "integration": DOMAIN,
-            "slots": slots,
+            "slots": self._attr_cache,
             "names": names,
             "horizon_end": combined[-1]["end"] if combined else None,
-            "has_tomorrow": self._has_tomorrow(combined),
+            # Time-dependent, so evaluated on every write (cheaply, from the cache).
+            "has_tomorrow": real_end is not None
+            and (real_end - dt_util.utcnow()) > timedelta(hours=12),
         }

@@ -39,6 +39,10 @@ class SourceHeatingBinarySensor(LiveHeatingCostsEntity, BinarySensorEntity):
     """On while this curve source is actively delivering heat."""
 
     _attr_device_class = BinarySensorDeviceClass.RUNNING
+    # Live telemetry that changes on nearly every 60 s tick: recording it
+    # would write a state row per pump per minute for no history value (the
+    # on/off state itself is still recorded).
+    _unrecorded_attributes = frozenset({"power_w", "heating_fraction", "hvac_action"})
 
     def __init__(self, coordinator: LiveHeatingCostsCoordinator, subentry_id: str) -> None:
         super().__init__(coordinator, subentry_id, "heating")
@@ -67,7 +71,7 @@ class SourceHeatingBinarySensor(LiveHeatingCostsEntity, BinarySensorEntity):
         return {
             "hvac_action": last.hvac_action if last is not None else None,
             "power_w": last.power_w if last is not None else None,
-            "heating_fraction": snap.heating_fraction,
+            "heating_fraction": round(snap.heating_fraction, 3),
         }
 
 

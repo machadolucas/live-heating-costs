@@ -255,3 +255,45 @@ def test_naive_datetime_rejected():
         Sample(
             ts=datetime(2026, 1, 1, 0, 0), power_w=0.0, energy_kwh=0.0, temp_c=0.0, hvac_action=None
         )
+
+
+def test_heating_segment_without_temperature_makes_window_unusable():
+    """Heat produced at an unknown temperature can't be modeled; counting it as
+    zero would fake a COP collapse — no measurement, the blend uses modeled."""
+    samples = _series(
+        30,
+        power_w=800.0,
+        energy_kwh=lambda i: 100.0 + i * 0.02,
+        temp_c=lambda i: None if i == 10 else 0.0,
+        hvac_action="heating",
+    )
+    wc = window_cop(samples, lambda t: 3.0, DEFAULT_STANDBY_W)
+    assert wc.measured_cop is None
+    assert wc.heating_fraction == pytest.approx(1.0)
+    assert blend_cop(3.0, wc.measured_cop, wc.heating_fraction, 0.5, 6.5) == pytest.approx(3.0)
+
+
+def test_defrost_segment_without_temperature_still_counts_as_zero_heat():
+    """Defrost energy is known to make no heat, so a missing temperature there
+    doesn't matter — the deliberate zero-numerator drag stays."""
+    samples = _series(
+        30,
+        power_w=800.0,
+        energy_kwh=lambda i: 100.0 + i * 0.02,
+        temp_c=lambda i: None if i >= 20 else 0.0,
+        hvac_action=lambda i: "defrosting" if i >= 20 else "heating",
+    )
+    wc = window_cop(samples, lambda t: 3.0, DEFAULT_STANDBY_W)
+    assert wc.measured_cop == pytest.approx(3.0 * 20 / 30)
+
+
+def test_idle_segment_without_temperature_is_harmless():
+    samples = _series(
+        30,
+        power_w=lambda i: 2.0 if i >= 20 else 800.0,
+        energy_kwh=lambda i: 100.0 + min(i, 20) * 0.03,
+        temp_c=lambda i: None if i >= 20 else 0.0,
+        hvac_action=None,
+    )
+    wc = window_cop(samples, lambda t: 3.0, DEFAULT_STANDBY_W)
+    assert wc.measured_cop == pytest.approx(3.0)

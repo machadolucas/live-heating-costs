@@ -107,8 +107,12 @@ def _require_capacity_kw(data: Mapping) -> float:
 
 def _points_from_raw(raw: object, field: str) -> tuple[tuple[float, float], ...]:
     try:
-        points = [(float(p[0]), float(p[1])) for p in raw]  # type: ignore[union-attr]
-    except (TypeError, ValueError, IndexError) as err:
+        points = []
+        for p in raw:  # type: ignore[union-attr]
+            if not isinstance(p, list | tuple) or len(p) != 2:
+                raise ValueError(f"expected a [temp, value] pair, got {p!r}")
+            points.append((float(p[0]), float(p[1])))
+    except (TypeError, ValueError) as err:
         raise ConfigError(field, f"invalid points for {field}: {err}") from err
     errors = validate_points(points)
     if errors:
@@ -327,6 +331,10 @@ def _curve_from_subentry(data: Mapping) -> CurveSourceConfig:
     pump_temp_entity = data.get(CONF_PUMP_TEMP_ENTITY) or None
     temp_entity_override = data.get(CONF_TEMP_ENTITY_OVERRIDE) or None
     standby_w = float(data.get(CONF_STANDBY_W, DEFAULT_STANDBY_W))
+    if standby_w < 0:
+        # Negative would make "power > standby_w" true at 0 W: an idle pump
+        # would count as active and drag the measured COP to nonsense.
+        raise ConfigError(CONF_STANDBY_W, "standby_w must be >= 0")
     blend_window_min = int(data.get(CONF_BLEND_WINDOW_MIN, DEFAULT_BLEND_WINDOW_MIN))
 
     raw_preset = data.get(CONF_PRESET)

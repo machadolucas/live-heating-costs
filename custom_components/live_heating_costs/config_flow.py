@@ -17,6 +17,7 @@ from homeassistant.config_entries import (
     SOURCE_RECONFIGURE,
     SOURCE_USER,
     ConfigEntry,
+    ConfigEntryState,
     ConfigFlow,
     ConfigFlowResult,
     ConfigSubentryFlow,
@@ -95,7 +96,6 @@ from .const import (
 )
 
 DEFAULT_HUB_NAME = "Live Heating Costs"
-DEFAULT_ENERGY_DENSITY_SUGGESTION = 1700
 
 _BOX = selector.NumberSelectorMode.BOX
 _DROPDOWN = selector.SelectSelectorMode.DROPDOWN
@@ -108,6 +108,19 @@ def _sensor_selector(**kwargs: Any) -> selector.EntitySelector:
 def _clean(user_input: dict) -> dict:
     """Drop unset optionals so downstream defaults (models.py) apply cleanly."""
     return {k: v for k, v in user_input.items() if v not in (None, "")}
+
+
+def _merge_step(old: dict, schema: vol.Schema, user_input: dict) -> dict:
+    """Merge one form step's submission over previously stored/collected data.
+
+    The step's own fields are dropped from ``old`` first: the frontend simply
+    omits an optional field the user cleared, so a plain ``{**old, **new}``
+    would resurrect the old value and a stale entity (a removed climate
+    entity, say) could never be unset on reconfigure. Fields owned by other
+    steps are kept as they are.
+    """
+    owned = {str(key) for key in schema.schema}
+    return {**{k: v for k, v in old.items() if k not in owned}, **_clean(user_input)}
 
 
 def _entity_with_real_state(hass: HomeAssistant, entity_id: str | None):
@@ -269,12 +282,14 @@ class LiveHeatingCostsConfigFlow(ConfigFlow, domain=DOMAIN):
         """Edit the hub's shared sensors (demand step follows, same as add)."""
         entry = self._get_reconfigure_entry()
         errors: dict[str, str] = {}
+        defaults = dict(entry.data)
         if user_input is not None:
+            merged = _merge_step(dict(entry.data), _hub_schema({}), user_input)
             errors = _validate_hub_fields(self.hass, user_input)
             if not errors:
-                self._hub_data = {**entry.data, **user_input}
+                self._hub_data = merged
                 return await self.async_step_demand()
-        defaults = {**entry.data, **(user_input or {})}
+            defaults = merged
         return self.async_show_form(
             step_id="reconfigure", data_schema=_hub_schema(defaults), errors=errors
         )
@@ -283,12 +298,21 @@ class LiveHeatingCostsConfigFlow(ConfigFlow, domain=DOMAIN):
         """Collect demand-model fields, branching on the chosen mode."""
         mode = self._hub_data.get(CONF_DEMAND_MODE, DEMAND_MODE_INTERNAL)
         if user_input is not None:
-            data = {**self._hub_data, **_clean(user_input)}
+            # Only the current mode's fields are owned here; the other mode's
+            # (e.g. a UA seed while temporarily on an external demand entity)
+            # survive a mode switch untouched.
+            data = _merge_step(self._hub_data, _demand_schema(mode, {}), user_input)
             if self.source == SOURCE_RECONFIGURE:
                 entry = self._get_reconfigure_entry()
-                return self.async_update_reload_and_abort(
-                    entry, data=data, title=data.get(CONF_NAME, entry.title)
-                )
+                title = data.get(CONF_NAME, entry.title)
+                # A loaded entry's update listener (__init__._async_reload_entry)
+                # already reloads on the data change, so reloading here too
+                # would set the hub up twice. That listener only exists after a
+                # successful setup, though: an entry whose setup failed must be
+                # reloaded explicitly or the corrected config never runs.
+                if entry.state is ConfigEntryState.LOADED:
+                    return self.async_update_and_abort(entry, data=data, title=title)
+                return self.async_update_reload_and_abort(entry, data=data, title=title)
             await self.async_set_unique_id(data[CONF_BUY_PRICE_ENTITY])
             self._abort_if_unique_id_configured()
             return self.async_create_entry(title=data.get(CONF_NAME, DEFAULT_HUB_NAME), data=data)
@@ -374,9 +398,11 @@ def _static_schema(defaults: dict, include_name: bool) -> vol.Schema:
                     min=0.01, step=0.01, unit_of_measurement="€", mode=_BOX
                 )
             ),
+            # No suggested value for a new source: left blank, models.py applies
+            # the per-fuel-unit default (a flat 1700 was only right for m³ and
+            # priced kg or kWh fuel ~1000x off). Reconfigure shows the stored one.
             vol.Optional(
-                CONF_ENERGY_DENSITY,
-                description=suggest(CONF_ENERGY_DENSITY, DEFAULT_ENERGY_DENSITY_SUGGESTION),
+                CONF_ENERGY_DENSITY, description=suggest(CONF_ENERGY_DENSITY)
             ): selector.NumberSelector(
                 selector.NumberSelectorConfig(min=0.01, step=0.1, mode=_BOX)
             ),
@@ -482,7 +508,7 @@ def _curve_entities_schema(defaults: dict, include_name: bool) -> vol.Schema:
             vol.Optional(
                 CONF_STANDBY_W, default=defaults.get(CONF_STANDBY_W, DEFAULT_STANDBY_W)
             ): selector.NumberSelector(
-                selector.NumberSelectorConfig(unit_of_measurement="W", mode=_BOX)
+                selector.NumberSelectorConfig(min=0, unit_of_measurement="W", mode=_BOX)
             ),
             vol.Optional(
                 CONF_BLEND_WINDOW_MIN,
@@ -562,6 +588,40 @@ def _curve_table_prefill(preset_key: str, existing: dict) -> dict:
     }
 
 
+def _preset_edited(preset: curves.PumpPreset, user_input: dict) -> bool:
+    """True if the submitted tables differ from ``preset``'s canonical values.
+
+    The form prefills a preset's points/bounds as editable text; a user who
+    tweaks them but leaves the dropdown on the preset means "this preset,
+    adjusted" — silently storing the canonical values instead would throw the
+    edit away. Points are compared parsed (formatting/order don't count as an
+    edit); unparseable text counts as edited so it gets the custom path's
+    error message. A blank/missing field is "left alone", not an edit.
+    """
+    for field, canonical in (
+        (CONF_COP_POINTS, preset.cop_points),
+        (CONF_CAPACITY_POINTS, preset.capacity_points),
+    ):
+        text = user_input.get(field)
+        if not text or not str(text).strip():
+            continue
+        try:
+            points = curves.parse_curve_text(str(text))
+        except curves.CurveParseError:
+            return True
+        if sorted(points) != sorted((float(x), float(y)) for x, y in canonical):
+            return True
+    for field, canonical_value in (
+        (CONF_OPERATING_LIMIT_C, preset.operating_limit_c),
+        (CONF_MIN_COP, preset.min_cop),
+        (CONF_MAX_COP, preset.max_cop),
+    ):
+        value = user_input.get(field)
+        if value is not None and float(value) != float(canonical_value):
+            return True
+    return False
+
+
 class SourceSubentryFlowHandler(ConfigSubentryFlow):
     """Add or reconfigure a heat source.
 
@@ -632,7 +692,7 @@ class SourceSubentryFlowHandler(ConfigSubentryFlow):
         placeholders: dict[str, str] | None = None
         data = self._defaults
         if user_input is not None:
-            data = {**self._defaults, **_clean(user_input)}
+            data = _merge_step(self._defaults, _static_schema({}, include_name), user_input)
             try:
                 models.source_from_subentry(data)
             except models.ConfigError as err:
@@ -658,7 +718,7 @@ class SourceSubentryFlowHandler(ConfigSubentryFlow):
         placeholders: dict[str, str] | None = None
         data = self._defaults
         if user_input is not None:
-            data = {**self._defaults, **_clean(user_input)}
+            data = _merge_step(self._defaults, _dynamic_fixed_schema({}, include_name), user_input)
             try:
                 models.source_from_subentry(data)
             except models.ConfigError as err:
@@ -681,7 +741,9 @@ class SourceSubentryFlowHandler(ConfigSubentryFlow):
     ) -> SubentryFlowResult:
         include_name = not self._is_new
         if user_input is not None:
-            self._defaults = {**self._defaults, **_clean(user_input)}
+            self._defaults = _merge_step(
+                self._defaults, _curve_entities_schema({}, include_name), user_input
+            )
             return await self.async_step_curve_tables()
         return self.async_show_form(
             step_id="curve_entities",
@@ -715,6 +777,22 @@ class SourceSubentryFlowHandler(ConfigSubentryFlow):
 
         errors: dict[str, str] = {}
         placeholders: dict[str, str] | None = None
+
+        if submitted_preset != PRESET_CUSTOM and _preset_edited(
+            curves.PRESETS[submitted_preset], user_input
+        ):
+            # Edited preset tables become a custom curve seeded from the
+            # preset: blank fields keep the preset's value, edits win.
+            canonical = _curve_table_prefill(submitted_preset, {})
+            user_input = {
+                **canonical,
+                **{k: v for k, v in user_input.items() if v not in (None, "")},
+                CONF_PRESET: PRESET_CUSTOM,
+            }
+            submitted_preset = PRESET_CUSTOM
+            # An error re-render must show (and then accept) "custom", not
+            # look like a dropdown change that would reset the edited text.
+            self._curve_prefill_preset = PRESET_CUSTOM
 
         if submitted_preset != PRESET_CUSTOM:
             preset_obj = curves.PRESETS[submitted_preset]

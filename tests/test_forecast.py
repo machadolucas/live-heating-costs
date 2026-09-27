@@ -513,3 +513,162 @@ def test_combined_slots_empty_source_list_does_not_make_slots_partial():
     result = combined_slots({"resistive": _two_slot_pump(t), "pump": []})
 
     assert all(item["partial"] is False for item in result)
+
+
+# --------------------------------------------------------------------------- #
+# in-progress slot evaluated over its remaining part
+# --------------------------------------------------------------------------- #
+
+
+def test_in_progress_slot_keeps_curve_source_past_its_midpoint():
+    # Hourly price slots; now is 40 min into the first. The weather forecast
+    # starts at the next full hour and anchor_temps puts the measured reading
+    # at `now` — the full-slot midpoint (:30) is before that anchor, so the
+    # pump used to drop out of the slot it's running in right now.
+    slot_start = NOW
+    now = slot_start + timedelta(minutes=40)
+    price_slots = _price_slots(4, start=slot_start, step_min=60)
+    weather = _hourly_temps(6, start=slot_start + timedelta(hours=1), t_start=0.0, t_end=-6.0)
+    temps = anchor_temps(weather, now, current_temp_c=3.0)
+
+    out = build_source_forecast(
+        price_slots,
+        [],
+        temps,
+        now,
+        horizon_h=4,
+        cop_at=cop_curve,
+        capacity_at=cap_curve,
+        fixed_cop=None,
+        fixed_capacity_kw=None,
+        operating_limit_c=None,
+    )
+    assert out[0].start == slot_start  # original boundaries kept
+    assert out[0].end == slot_start + timedelta(hours=1)
+    # Evaluated at the midpoint of [now, end] = :50, between 3.0 (at :40) and
+    # 0.0 (at 1:00) -> 1.5 °C.
+    assert out[0].cop == pytest.approx(cop_curve(1.5))
+    assert out[0].buy == pytest.approx(price_slots[0].buy / cop_curve(1.5))
+    # Later slots still use their full-slot midpoints.
+    assert out[1].cop == pytest.approx(cop_curve(-0.5))
+
+
+# --------------------------------------------------------------------------- #
+# min_cop / max_cop clamp (parity with blend.blend_cop)
+# --------------------------------------------------------------------------- #
+
+
+def _curve_forecast(cop_at, **kwargs):
+    return build_source_forecast(
+        _price_slots(4),
+        [],
+        [TempPoint(NOW, 0.0), TempPoint(NOW + timedelta(hours=2), 0.0)],
+        NOW,
+        horizon_h=1,
+        cop_at=cop_at,
+        capacity_at=cap_curve,
+        fixed_cop=None,
+        fixed_capacity_kw=None,
+        operating_limit_c=None,
+        **kwargs,
+    )
+
+
+def test_modeled_cop_clamped_like_live_blend():
+    from custom_components.live_heating_costs.blend import blend_cop
+
+    for raw in (12.0, 0.2):
+        out = _curve_forecast(lambda _t, raw=raw: raw, min_cop=0.5, max_cop=6.5)
+        live = blend_cop(raw, None, 0.0, 0.5, 6.5)
+        assert all(s.cop == pytest.approx(live) for s in out)
+        assert out[0].buy == pytest.approx(_price_slots(1)[0].buy / live)
+
+
+def test_no_clamp_bounds_keeps_raw_cop():
+    out = _curve_forecast(lambda _t: 12.0)
+    assert out[0].cop == pytest.approx(12.0)
+
+
+def test_non_positive_cop_prices_as_unknown():
+    out = _curve_forecast(lambda _t: 0.0)
+    assert all(s.buy is None for s in out)
+    out = _curve_forecast(lambda _t: -1.0)
+    assert all(s.buy is None for s in out)
+
+
+def test_operating_limit_still_excludes_with_clamp():
+    out = build_source_forecast(
+        _price_slots(2),
+        [],
+        [TempPoint(NOW, -35.0), TempPoint(NOW + timedelta(hours=2), -35.0)],
+        NOW,
+        horizon_h=1,
+        cop_at=lambda _t: 0.1,
+        capacity_at=cap_curve,
+        fixed_cop=None,
+        fixed_capacity_kw=None,
+        operating_limit_c=-28.0,
+        min_cop=0.5,
+        max_cop=6.5,
+    )
+    assert all(s.buy is None and s.cop is None and s.capacity_kw == 0.0 for s in out)
+
+
+# --------------------------------------------------------------------------- #
+# interp_temp: bisect lookup keeps the old semantics
+# --------------------------------------------------------------------------- #
+
+
+def test_interp_temp_exact_knot_and_last_point():
+    pts = [TempPoint(NOW + timedelta(hours=h), float(h)) for h in range(4)]
+    assert interp_temp(pts, NOW + timedelta(hours=2)) == 2.0
+    assert interp_temp(pts, NOW + timedelta(hours=3)) == 3.0
+    assert interp_temp(pts, NOW) == 0.0
+
+
+def test_interp_temp_duplicate_timestamp_takes_first():
+    t = NOW + timedelta(hours=1)
+    pts = [
+        TempPoint(NOW, 0.0),
+        TempPoint(t, 5.0),
+        TempPoint(t, 7.0),
+        TempPoint(NOW + timedelta(hours=2), 9.0),
+    ]
+    assert interp_temp(pts, t) == 5.0
+    assert interp_temp(pts, NOW + timedelta(minutes=90)) == pytest.approx(8.0)
+
+
+def test_interp_temp_single_point():
+    pts = [TempPoint(NOW, 4.0)]
+    assert interp_temp(pts, NOW) == 4.0
+    assert interp_temp(pts, NOW + timedelta(seconds=1)) is None
+
+
+def test_interp_temp_matches_linear_scan_reference():
+    import random
+
+    rng = random.Random(7)
+    pts = [
+        TempPoint(NOW + timedelta(minutes=rng.randint(0, 600)), rng.uniform(-20, 10))
+        for _ in range(40)
+    ]
+    ordered = sorted(pts, key=lambda p: p.ts)
+
+    def reference(t):
+        if t < ordered[0].ts or t > ordered[-1].ts:
+            return None
+        for a, b in zip(ordered, ordered[1:], strict=False):
+            if a.ts <= t <= b.ts:
+                if a.ts == b.ts:
+                    return a.temp_c
+                frac = (t - a.ts).total_seconds() / (b.ts - a.ts).total_seconds()
+                return a.temp_c + frac * (b.temp_c - a.temp_c)
+        return ordered[-1].temp_c
+
+    for _ in range(300):
+        t = NOW + timedelta(minutes=rng.uniform(-30, 630))
+        want = reference(t)
+        got = interp_temp(pts, t)
+        assert (got is None) == (want is None)
+        if want is not None:
+            assert got == pytest.approx(want)

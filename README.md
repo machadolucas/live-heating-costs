@@ -120,7 +120,8 @@ is a proper time integral of `max(base_temp − outdoor_temp, 0)` and `UA`
 
 - **Seed**: `UA` starts at a configured prior — the default, **140 W/°C**,
   reproduces the legacy hand-tuned heating-demand constant it replaces.
-- **Learning**: once a day (00:05 local), the day's actual delivered heat
+- **Learning**: once a day (at local midnight — or, if HA was down across
+  it, as soon as it's back), the day's actual delivered heat
   (Σ heat-pump `energy × COP` + resistive kWh + logged/estimated wood) and
   degree-hours are folded into an EWMA of the `delivered_kwh / degree_hours`
   ratio — α 0.15 for live days, a slower α 0.05 for backfilled ones, so bulk
@@ -131,7 +132,10 @@ is a proper time integral of `max(base_temp − outdoor_temp, 0)` and `UA`
 - **Quality gates**: a day only teaches the model if it had a meaningful
   heating load (≥ 24 degree-hours) and its delivered heat was plausible
   (0.5–200 kWh) — guards against meter resets or a burn night nobody logged
-  producing a wild ratio. Non-quality days are still stored and shown.
+  producing a wild ratio — and its outdoor temperature was known for at
+  least 90 % of the day (heat keeps counting through a sensor outage while
+  degree-hours stall). Energy spent while HA itself was down is never
+  credited. Non-quality days are still stored and shown.
 - **Backfill**: on first setup (only once — a reload never double-imports),
   up to `backfill_days` (default 60) of recorder history for metered sources
   is replayed through the same learner, so the model doesn't start cold.
@@ -268,7 +272,9 @@ Copy `custom_components/live_heating_costs` into your Home Assistant
   there is **no** fallback to COP = 1, ever.
 - **c/kWh vs EUR/kWh**: every entity displays cost in **c/kWh**. Internally,
   the whole engine works in **EUR/kWh**; the single ×100 conversion happens
-  once, in the sensor platform.
+  once, in the sensor platform. Price entities in c/kWh, snt/kWh or EUR/MWh
+  (by their `unit_of_measurement`) are scaled on input; so are meters in
+  Wh/MWh or kW and temperatures in °F/K.
 - **Does this control anything?** No. It's advisory-only — it computes costs,
   rankings and a forecast, and that's the whole surface. Pair it with your
   own price-triggered automations if you want actuation.

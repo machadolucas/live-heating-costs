@@ -62,15 +62,27 @@ wood activity entities ──┘                    │
         bundled card (frontend/live-heating-costs-card.js)
         reads sensor attributes only — see docs/card.md
 
-Daily capture (00:05 local, separate from the sampling tick):
-  day accumulator ──► ua_learner.make_row + ingest ──► UaState ──► RuntimeStore
-  (quality-gated: degree_hours >= 24, delivered_kwh in [0.5, 200])
+Day roll / capture (_maybe_roll_day: on load, top of every sampling tick,
+and the 00:05 local safety-net job — date-guarded, so a day is captured once
+even if HA was down across midnight):
+  stale day accumulator ──► predict (out-of-sample) ──► note_prediction
+    ──► ua_learner.make_row(coverage=temp_covered_s / real day length) + ingest
+    ──► UaState ──► RuntimeStore; new DayAccum keeps the counter baselines
+  (quality-gated: degree_hours >= 24, delivered_kwh in [0.5, 200],
+   temperature coverage >= 90 %)
+  A sampling gap > SAMPLE_GAP_REBASELINE_S re-baselines the energy counters
+  instead of crediting the outage's jump.
 
-One-shot recorder backfill (async_setup_entry, background task):
-  recorder statistics (temp mean/hour, energy change/day) ──► history.async_backfill
-  ──► ua_learner rows tagged backfilled=True (slower EWMA α) ──► UaState
+Recorder background tasks (async_setup_entry, never block setup):
+  history.async_backfill — whole local days before today, days with fewer
+    than BACKFILL_MIN_TEMP_HOURS hourly means skipped, runs once
+    (persisted backfill_done) ──► rows tagged backfilled=True (slower EWMA α)
+  coordinator.async_seed_temp_history — last 24 h of hourly means (°C) seed
+    the 24 h temperature history so the demand model doesn't restart cold
 
-Forecast rebuild (every 15 min, or on price-entity state change, debounced):
+Forecast rebuild (on the :00/:15/:30/:45 slot grid, fuel-override edits, or
+price-entity changes via the recompute throttle; serialized by a lock,
+requests coalesced, prices read after the weather await):
   day-ahead + estimated price slots + hourly weather temps
     ──► forecast.build_source_forecast (per curve/dynamic_fixed source)
     ──► forecast.combined_slots (union by exact time boundary, cheapest tagged)
@@ -145,10 +157,14 @@ Forecast rebuild (every 15 min, or on price-entity state change, debounced):
   `ua` (`UaState.to_dict()` — seed, learned, sample_count, rolling_mae_kwh,
   last_predicted_kwh, rows), `day_accum` (`DayAccum.to_dict()` — date,
   degree_hours, delivered/electricity/wood kWh, per-source kWh, last-seen
-  energy counters), `wood_log` (capped to the last 500 entries),
-  `fuel_price_overrides`, and `last_event_ts` (per-source, for event-mode
-  debounce). Saves are debounced 10 s (`SAVE_DELAY_S`) via
-  `Store.async_delay_save`, flushed immediately on unload.
+  energy counters, `last_tick_utc`, `temp_covered_s`), `wood_log` (capped
+  to the last 500 entries), `fuel_price_overrides`, `last_event_ts`
+  (per-source, for event-mode debounce), and `backfill_done`. Significant
+  events save within 10 s (`SAVE_DELAY_S`); the 60 s sampling tick within
+  300 s (`SAVE_DELAY_TICK_S`). `RuntimeStore.schedule_save` only ever pulls
+  a pending write *earlier* (plain `Store.async_delay_save` postpones it to
+  the newest deadline, which a steady tick would do forever); HA's
+  final-write hook flushes on shutdown and unload saves immediately.
 - **Outdoor temperature is a chain, not one entity** (`temp_source.py`): a
   curve source resolves `pump reading -> per-source override -> hub sensor ->
   weather entity`, and the hub's own temperature (degree-hour accumulation,

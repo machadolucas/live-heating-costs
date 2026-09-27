@@ -55,8 +55,10 @@ Wood stove                                                    below operating li
   configured with 0 kW: its heat still counts toward UA learning, it's just
   never planned for), **COP *Y*** when known (hidden, never faked as 1.0,
   when `cop` is `null`), and the bold cost to 1 decimal.
-- The cheapest row (`ranking[0]`) gets an accent left-border and tinted
-  background.
+- The cheapest row — the first ranking row with `capacity_kw > 0`, the same
+  rule the integration uses for its `cheapest` state (a cheaper 0 kW source
+  can top the ranking but is never dispatched) — gets an accent left-border
+  and tinted background.
 - **Excluded** sources (cost couldn't be computed this tick) are listed at
   the bottom, greyed, with a human reason: `below_operating_limit` → "below
   operating limit", `price_unavailable` → "price unavailable",
@@ -74,6 +76,10 @@ any card size, on any screen.
 
 - A **y axis** in the left gutter shows 2–4 "nice" gridlines (the usual
   {1, 2, 5}×10ⁿ ladder) labelled in c/kWh, with a small unit label above them.
+  The scale is signed: when a slot is negatively priced (spot prices do go
+  below zero) the domain extends below 0, a 0 gridline is drawn, and the
+  negative ticks are labelled with their sign rather than clamped to the
+  baseline.
 - A solid, primary-coloured vertical line at the left edge of the plot marks
   **"now HH:MM"** (the wall clock), so the timeline's origin is never
   ambiguous.
@@ -103,7 +109,7 @@ any card size, on any screen.
 - A **legend** below lists every known source as a coloured, clickable chip
   (colours are assigned once per source and kept for the life of the card,
   so they don't shuffle as the ranking re-sorts); the currently-cheapest
-  source's chip is bold. Clicking a chip opens that source's more-info, same
+  source's chip (same rule as the Now view's highlighted row) is bold. Clicking a chip opens that source's more-info, same
   as clicking its Now-view row.
 
 If no forecast entity/data is available, the view shows a quiet "No
@@ -170,7 +176,9 @@ the card never parses a name or subentry id into a guessed entity id.
   name (or `"unknown"`); attributes: `ranking` (array, cheapest first — see
   each field's meaning in the Now-view section above, including `entity_id`,
   the source's own heat-cost sensor, used to open its more-info), `excluded`
-  (array of `{name, reason, entity_id}`), `demand_kw`, `demand_covered`,
+  (array of `{name, subentry_id, reason, entity_id}` — `subentry_id` keys the
+  source's colour and its forecast-legend chip, which an excluded source can
+  still have), `demand_kw`, `demand_covered`,
   `shortfall_kw`, `blended_cost_c_per_kwh`, `demand_entity_id` (the
   heating-demand sensor, for the demand pill's more-info).
 - **Forecast sensor** (`forecast_entity`) — attributes: `slots` (array of
@@ -182,6 +190,17 @@ the card never parses a name or subentry id into a guessed entity id.
   nonzero capacity beat every dynamic source that slot. `partial` is true
   when a source that has forecast slots elsewhere is missing from this one
   (its cost there is unknown, not merely absent from the comparison).
+
+Both sensors' attributes are rebuilt by the integration every minute, and
+HA hands the card a new `hass` object on *any* state change in the house.
+The card therefore caches the discovered entity ids (re-scanning
+`hass.states` only when a cached id disappears), re-renders only when the
+two sensors' state objects change identity (HA replaces the object on every
+update, so a reference comparison is exact and O(1)), keeps its `<style>` in
+a persistent element and swaps only the content container, restores
+keyboard focus to the same `data-more-info` element after a re-render, and
+re-resolves a pinned forecast slot by its `start` so the readout always
+shows the current costs rather than a snapshot from when it was tapped.
 
 This contract is defined and owned by the integration's sensor platform, not
 by the card — if a field is renamed there, update

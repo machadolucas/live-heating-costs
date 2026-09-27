@@ -303,3 +303,60 @@ def test_daily_row_to_dict_from_dict_round_trip():
     )
     restored = DailyRow.from_dict(row.to_dict())
     assert restored == row
+
+
+# --------------------------------------------------------------------------- #
+# coverage gate + ingest idempotence
+# --------------------------------------------------------------------------- #
+
+
+def _row(day: int = 1, **kwargs) -> DailyRow:
+    base = {
+        "date": _iso_date(day),
+        "degree_hours": 100.0,
+        "delivered_kwh": TRUE_UA * 100.0,
+        "electricity_kwh": TRUE_UA * 100.0,
+        "wood_kwh": 0.0,
+    }
+    base.update(kwargs)
+    return make_row(**base)
+
+
+def test_quality_gate_requires_temperature_coverage():
+    from custom_components.live_heating_costs.const import UA_MIN_COVERAGE
+
+    assert _row().quality is True  # default coverage = full day
+    assert _row(coverage=UA_MIN_COVERAGE).quality is True
+    assert _row(coverage=UA_MIN_COVERAGE - 0.01).quality is False
+    assert _row(coverage=0.5).quality is False
+    # A low-coverage day is still stored, it just doesn't teach.
+    state = ingest(UaState(seed=SEED), _row(coverage=0.5))
+    assert len(state.rows) == 1
+    assert state.sample_count == 0
+    assert state.learned is None
+
+
+def test_live_reingest_of_same_date_does_not_learn_twice():
+    state = ingest(UaState(seed=SEED), _row(1))
+    assert state.sample_count == 1
+    learned = state.learned
+
+    again = ingest(state, _row(1, delivered_kwh=2 * TRUE_UA * 100.0))
+    assert again.sample_count == 1
+    assert again.learned == learned
+    # ...but the stored row is the latest capture (display).
+    assert len(again.rows) == 1
+    assert again.rows[0].delivered_kwh == pytest.approx(2 * TRUE_UA * 100.0)
+
+
+def test_backfilled_row_never_overwrites_existing_date():
+    state = ingest(UaState(seed=SEED), _row(1))
+    after = ingest(state, _row(1, delivered_kwh=3.0, backfilled=True))
+    assert after == state
+
+
+def test_backfilled_row_for_new_date_still_learns():
+    state = ingest(UaState(seed=SEED), _row(1))
+    after = ingest(state, _row(2, backfilled=True))
+    assert after.sample_count == 2
+    assert len(after.rows) == 2

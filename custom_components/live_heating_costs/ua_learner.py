@@ -27,6 +27,7 @@ from .const import (
     UA_EWMA_ALPHA_BACKFILL,
     UA_EWMA_ALPHA_LIVE,
     UA_LEARNED_CLAMP,
+    UA_MIN_COVERAGE,
     UA_MIN_DEGREE_HOURS,
     UA_ROWS_CAP,
     UA_SEED_BLEND_SAMPLES,
@@ -138,16 +139,25 @@ def make_row(
     wood_kwh: float,
     backfilled: bool = False,
     wood_estimated: bool = False,
+    coverage: float = 1.0,
 ) -> DailyRow:
     """Build a :class:`DailyRow`, applying the quality gate from ``const``.
 
     A day only teaches the model when it had a meaningful heating load
-    (``degree_hours >= UA_MIN_DEGREE_HOURS``) and the logged delivered heat is
+    (``degree_hours >= UA_MIN_DEGREE_HOURS``), the logged delivered heat is
     plausible (inside ``UA_DELIVERED_RANGE_KWH`` — guards against meter
-    resets / missing wood logging producing a wild ratio).
+    resets / missing wood logging producing a wild ratio), and the outdoor
+    temperature was observed for most of it (``coverage >= UA_MIN_COVERAGE``,
+    the fraction of the day with a known reading). Heat keeps accumulating
+    through a temperature outage while degree-hours stall, so a half-observed
+    day would otherwise teach roughly twice the true UA.
     """
     lo, hi = UA_DELIVERED_RANGE_KWH
-    quality = degree_hours >= UA_MIN_DEGREE_HOURS and lo <= delivered_kwh <= hi
+    quality = (
+        degree_hours >= UA_MIN_DEGREE_HOURS
+        and lo <= delivered_kwh <= hi
+        and coverage >= UA_MIN_COVERAGE
+    )
     return DailyRow(
         date=date,
         degree_hours=degree_hours,
@@ -164,7 +174,10 @@ def ingest(state: UaState, row: DailyRow) -> UaState:
     """Fold one day's outcome into the state. Pure — returns a new ``UaState``.
 
     Rows are kept in a ring capped at ``UA_ROWS_CAP`` (oldest dropped first,
-    ordered by date); ingesting a row for a date already present replaces it.
+    ordered by date). A date already present is never learned twice: a live
+    row replaces the stored one for display but leaves ``learned`` and
+    ``sample_count`` alone, and a backfilled row never overwrites an existing
+    row at all (the live capture saw wood and the full day; backfill cannot).
 
     Quality rows update ``learned`` via an EWMA of the day's
     ``delivered_kwh / degree_hours`` ratio (backfilled rows use a slower
@@ -175,6 +188,9 @@ def ingest(state: UaState, row: DailyRow) -> UaState:
     last stashed (regardless of that row's own quality gate — the prediction
     was for the demand that *did* happen).
     """
+    existing = next((r for r in state.rows if r.date == row.date), None)
+    if existing is not None and row.backfilled:
+        return state
     rows = [r for r in state.rows if r.date != row.date]
     rows.append(row)
     rows.sort(key=lambda r: r.date)
@@ -183,7 +199,7 @@ def ingest(state: UaState, row: DailyRow) -> UaState:
 
     learned = state.learned
     sample_count = state.sample_count
-    if row.quality:
+    if row.quality and existing is None:
         ratio = row.delivered_kwh / row.degree_hours
         alpha = UA_EWMA_ALPHA_BACKFILL if row.backfilled else UA_EWMA_ALPHA_LIVE
         learned = ratio if learned is None else (1 - alpha) * learned + alpha * ratio

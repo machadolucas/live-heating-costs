@@ -52,6 +52,26 @@ _ATTR_TEMPERATURE = "temperature"
 _ATTR_TEMPERATURE_UNIT = "temperature_unit"
 
 _FAHRENHEIT_UNITS = {"°F", "F"}
+_KELVIN_UNITS = {"K"}
+
+
+def to_celsius(value: float | None, unit: object) -> float | None:
+    """Convert a reading in ``unit`` (an entity's unit string) to °C.
+
+    Sensors and weather forecasts report in the instance's configured unit,
+    so on a °F instance ``23`` means -5 °C — and 23 °C is perfectly plausible,
+    so the sanity band alone would never catch it. Unknown or missing units
+    are taken as °C (the unit-less sensors this used to accept unchanged).
+    """
+    if value is None:
+        return None
+    if isinstance(unit, str):
+        u = unit.strip()
+        if u in _FAHRENHEIT_UNITS:
+            return (value - 32.0) * 5.0 / 9.0
+        if u in _KELVIN_UNITS:
+            return value - 273.15
+    return value
 
 
 @dataclass(frozen=True)
@@ -87,9 +107,7 @@ def weather_temp_c(attributes: Mapping[str, object] | None) -> float | None:
         value = float(raw)
     except (TypeError, ValueError):
         return None
-    unit = attributes.get(_ATTR_TEMPERATURE_UNIT)
-    if isinstance(unit, str) and unit.strip() in _FAHRENHEIT_UNITS:
-        value = (value - 32.0) * 5.0 / 9.0
+    value = to_celsius(value, attributes.get(_ATTR_TEMPERATURE_UNIT))
     return value if is_plausible(value) else None
 
 

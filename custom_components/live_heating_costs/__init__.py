@@ -234,10 +234,15 @@ async def async_setup_entry(hass: HomeAssistant, entry: LiveHeatingCostsConfigEn
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
     entry.async_on_unload(entry.add_update_listener(_async_reload_entry))
 
-    # UA-learner recorder backfill: best-effort, so it runs as a detached
-    # background task after the first refresh rather than blocking setup.
-    entry.async_create_task(
+    # Recorder work (UA backfill, 24 h temperature seeding) is best-effort, so
+    # it runs as *background* tasks: a slow recorder query can take many
+    # seconds on a big database, and a regular entry task would hold up HA's
+    # startup (and ``async_block_till_done``) until it finished.
+    entry.async_create_background_task(
         hass, history.async_backfill(hass, coordinator), "live_heating_costs_backfill"
+    )
+    entry.async_create_background_task(
+        hass, coordinator.async_seed_temp_history(), "live_heating_costs_temp_seed"
     )
 
     return True

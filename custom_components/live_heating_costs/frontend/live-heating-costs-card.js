@@ -131,6 +131,28 @@ function discoverForecastEntity(hass) {
   return candidates.find((id) => id.endsWith("_cost_forecast")) || candidates[0];
 }
 
+// The coordinator's rule for "cheapest": the first ranked source that can
+// actually be dispatched. A 0 kW source (e.g. a sauna counted for UA learning
+// only) can top the price ranking but is never planned for, so highlighting
+// ranking[0] would disagree with the sensor's own state.
+function cheapestRow(ranking) {
+  return (Array.isArray(ranking) ? ranking : []).find((r) => r && r.capacity_kw > 0) || null;
+}
+
+// "Nice" gridline step for a value span: the {1, 2, 5}×10^n ladder, picking
+// the first step that yields 2–4 intervals.
+function niceStep(span) {
+  if (!(span > 0)) return null;
+  for (let e = -3; e <= 5; e++) {
+    for (const m of [1, 2, 5]) {
+      const s = m * Math.pow(10, e);
+      const n = Math.floor(span / s + 1e-9);
+      if (n >= 2 && n <= 4) return s;
+    }
+  }
+  return span / 3;
+}
+
 function define(name, cls) {
   if (!customElements.get(name)) customElements.define(name, cls);
 }
@@ -228,9 +250,14 @@ class LiveHeatingCostsCard extends HTMLElement {
     this._colorMap = this._colorMap || new Map();
     this._uid = this._uid || Math.random().toString(36).slice(2, 8);
     this._sig = null;
+    this._mainIdCache = null;
+    this._fcIdCache = null;
     this._render();
   }
 
+  // HA assigns a new `hass` on *every* state change anywhere in the house —
+  // many times a second on a busy instance. _render() bails out cheaply
+  // unless one of the two sensors this card reads actually changed.
   set hass(hass) {
     this._hass = hass;
     this._render();
@@ -308,12 +335,24 @@ class LiveHeatingCostsCard extends HTMLElement {
     return {};
   }
 
+  // Auto-discovery scans every state in the house, so the result is cached
+  // and only redone when the cached entity disappears (removed/renamed).
   _mainEntityId() {
-    return this._config.entity || discoverMainEntity(this._hass);
+    if (this._config.entity) return this._config.entity;
+    const states = (this._hass && this._hass.states) || {};
+    if (!this._mainIdCache || !states[this._mainIdCache]) {
+      this._mainIdCache = discoverMainEntity(this._hass);
+    }
+    return this._mainIdCache;
   }
 
   _forecastEntityId() {
-    return this._config.forecast_entity || discoverForecastEntity(this._hass);
+    if (this._config.forecast_entity) return this._config.forecast_entity;
+    const states = (this._hass && this._hass.states) || {};
+    if (!this._fcIdCache || !states[this._fcIdCache]) {
+      this._fcIdCache = discoverForecastEntity(this._hass);
+    }
+    return this._fcIdCache;
   }
 
   // Stable colour per subentry id: assigned once, in order of first sighting
@@ -424,8 +463,9 @@ class LiveHeatingCostsCard extends HTMLElement {
     const a = mainState.attributes || {};
     const ranking = Array.isArray(a.ranking) ? a.ranking : [];
     const excluded = Array.isArray(a.excluded) ? a.excluded : [];
+    const cheapest = cheapestRow(ranking);
     const rows = ranking.length
-      ? `<div class="rows">${ranking.map((r, i) => this._rowHtml(r, i === 0)).join("")}</div>`
+      ? `<div class="rows">${ranking.map((r) => this._rowHtml(r, r === cheapest)).join("")}</div>`
       : `<div class="hint">No ranked sources right now.</div>`;
     const exclHtml = excluded.length
       ? `<div class="excluded">${excluded
@@ -455,33 +495,29 @@ class LiveHeatingCostsCard extends HTMLElement {
     return GUTTER + clamped * (this._VB_W - GUTTER);
   }
 
-  _yScale(cost, yMax) {
-    const clamped = Math.max(0, Math.min(cost, yMax));
-    const frac = yMax > 0 ? clamped / yMax : 0;
+  // Signed domain [yMin, yMax]: spot prices go negative, and a negative
+  // cost clamped to the baseline would read as "free" instead of "paid to
+  // consume". yMin is 0 unless some cost is below it.
+  _yScale(cost, yMin, yMax) {
+    const span = yMax - yMin;
+    const clamped = Math.max(yMin, Math.min(cost, yMax));
+    const frac = span > 0 ? (clamped - yMin) / span : 0;
     return CHART_BOTTOM - frac * (CHART_BOTTOM - CHART_TOP);
   }
 
-  // 2–4 "nice" gridline values under yMax (0 excluded — the chart baseline is
-  // already 0). Steps come from the usual {1,2,5}×10^n ladder.
-  _yTicks(yMax) {
-    if (!(yMax > 0)) return [];
-    let step = null;
-    outer: for (let e = -3; e <= 5; e++) {
-      for (const m of [1, 2, 5]) {
-        const s = m * Math.pow(10, e);
-        const n = Math.floor(yMax / s + 1e-9);
-        if (n >= 2 && n <= 4) {
-          step = s;
-          break outer;
-        }
-      }
-    }
-    if (step == null) step = yMax / 3;
+  // "Nice" gridline values across [yMin, yMax]. With a 0 baseline (the usual
+  // all-positive case) 0 itself is skipped — the baseline already marks it;
+  // with a negative domain 0 is drawn so the sign change is visible.
+  _yTicks(yMin, yMax) {
+    const step = niceStep(yMax - yMin);
+    if (step == null) return [];
     const ticks = [];
-    for (let i = 1; i <= 4; i++) {
+    const first = Math.ceil(yMin / step - 1e-9);
+    for (let i = first; i * step <= yMax * 1.0001 + 1e-12; i++) {
       const v = i * step;
-      if (v > yMax * 1.0001) break;
-      ticks.push(v);
+      if (v === 0 && yMin === 0) continue;
+      ticks.push(Math.abs(v) < step * 1e-6 ? 0 : v);
+      if (ticks.length > 8) break;
     }
     return ticks;
   }
@@ -525,22 +561,35 @@ class LiveHeatingCostsCard extends HTMLElement {
       });
     });
     let yMax = 1;
+    let yMin = 0;
     if (allCosts.length) {
       const sorted = [...allCosts].sort((x, y) => x - y);
       const p95 = sorted[Math.min(sorted.length - 1, Math.floor(0.95 * (sorted.length - 1)))];
       const actualMax = sorted[sorted.length - 1];
-      const clampMax = p95 * 1.3 || actualMax || 1;
-      yMax = Math.min(actualMax, clampMax) || clampMax || 1;
-      if (!(yMax > 0)) yMax = 1;
+      const actualMin = sorted[0];
+      if (actualMax > 0) {
+        const clampMax = p95 > 0 ? p95 * 1.3 : actualMax;
+        yMax = Math.min(actualMax, clampMax) || actualMax;
+      } else {
+        yMax = 0; // every cost is at or below zero
+      }
+      yMin = Math.min(0, actualMin);
+      if (!(yMax > yMin)) yMax = yMin + 1;
+      // Snap a negative floor down to a gridline so the lowest negative
+      // cost sits against a labelled tick rather than an unlabelled edge.
+      if (yMin < 0) {
+        const step = niceStep(yMax - yMin);
+        if (step) yMin = Math.floor(yMin / step + 1e-9) * step;
+      }
     }
 
     const x = (t) => this._xScale(t, rangeStart, rangeEnd);
-    const y = (c) => this._yScale(c, yMax);
+    const y = (c) => this._yScale(c, yMin, yMax);
 
     // y axis: faint gridlines across the plot, right-aligned labels in the
     // gutter, and one unit label above them.
     let yAxis = `<text x="0" y="${CHART_TOP - 6}" class="unit-label">c/kWh</text>`;
-    this._yTicks(yMax).forEach((v) => {
+    this._yTicks(yMin, yMax).forEach((v) => {
       const ly = y(v);
       yAxis +=
         `<line x1="${GUTTER}" y1="${ly}" x2="${W}" y2="${ly}" stroke="var(--divider-color, rgba(127,127,127,0.2))" stroke-width="1"></line>` +
@@ -659,7 +708,8 @@ class LiveHeatingCostsCard extends HTMLElement {
       (mainState && mainState.attributes && Array.isArray(mainState.attributes.ranking)
         ? mainState.attributes.ranking
         : []) || [];
-    const cheapestId = ranking[0] ? ranking[0].subentry_id : null;
+    const cheapest = cheapestRow(ranking);
+    const cheapestId = cheapest ? cheapest.subentry_id : null;
     const visible = new Set([
       ...Object.keys(names || {}),
       ...ranking.map((r) => r.subentry_id),
@@ -720,6 +770,18 @@ class LiveHeatingCostsCard extends HTMLElement {
     const rangeStart = now;
     const lastEnd = new Date(shown[shown.length - 1].end);
     const rangeEnd = lastEnd < horizonEnd ? lastEnd : horizonEnd;
+    // The tapped/hovered slot is an object from an *older* attribute
+    // snapshot; re-resolve it by start so the readout shows today's costs,
+    // and drop it once its slot has scrolled out of the window.
+    if (this._tapped) {
+      const fresh = shown.find((s) => s.start === this._tapped.start);
+      if (fresh) {
+        this._tapped = fresh;
+      } else {
+        this._tapped = null;
+        this._pinned = false;
+      }
+    }
     this._VB_W = this._width || 800;
     // Cached so the click/hover handlers can map a pointer position back to a
     // slot without rebuilding the whole forecast.
@@ -816,23 +878,35 @@ class LiveHeatingCostsCard extends HTMLElement {
     this._moreInfo(target.dataset.moreInfo);
   }
 
+  // Everything a render depends on. HA replaces a state object whenever that
+  // entity changes and keeps the same object otherwise, so comparing the two
+  // state objects by identity is exact — no JSON.stringify of the (large)
+  // ranking/slots attributes on every hass update.
   _signature() {
     const mainId = this._mainEntityId();
-    const mainState = mainId ? this._hass.states[mainId] : null;
     const fcId = this._forecastEntityId();
-    const fcState = fcId ? this._hass.states[fcId] : null;
     return [
-      JSON.stringify(this._config),
+      this._config,
       this._view,
       Math.floor(Date.now() / 60000),
       Math.round(this._width || 0),
-      mainId || "",
-      mainState ? mainState.state + JSON.stringify(mainState.attributes) : "missing",
-      fcId || "",
-      fcState ? JSON.stringify(fcState.attributes) : "missing",
+      mainId ? this._hass.states[mainId] : null,
+      fcId ? this._hass.states[fcId] : null,
       this._tapped ? this._tapped.start : "",
-      this._pinned ? "pin" : "",
-    ].join("§");
+      this._pinned,
+    ];
+  }
+
+  _sameSignature(a, b) {
+    return !!a && !!b && a.length === b.length && a.every((v, i) => v === b[i]);
+  }
+
+  // The more-info key of the focused element inside this card, if any.
+  _focusedKey() {
+    const root = typeof this.getRootNode === "function" ? this.getRootNode() : null;
+    const active = (root && root.activeElement) || document.activeElement;
+    if (!active || !this._content || !this._content.contains(active)) return null;
+    return active.dataset ? active.dataset.moreInfo || null : null;
   }
 
   _render() {
@@ -845,12 +919,19 @@ class LiveHeatingCostsCard extends HTMLElement {
       if (this.style) this.style.display = "block";
       this._card = document.createElement("ha-card");
       this.appendChild(this._card);
+      // The stylesheet is created once; only the content container below is
+      // re-rendered, so the browser doesn't reparse the CSS on every update.
+      const style = document.createElement("style");
+      style.textContent = CARD_CSS;
+      this._card.appendChild(style);
+      this._content = document.createElement("div");
+      this._card.appendChild(this._content);
       this._card.addEventListener("click", (e) => this._onClick(e));
       this._card.addEventListener("pointermove", (e) => this._onPointerMove(e));
       this._card.addEventListener("keydown", (e) => this._onKeyDown(e));
     }
     const sig = this._signature();
-    if (sig === this._sig) return;
+    if (this._sameSignature(sig, this._sig)) return;
     this._sig = sig;
 
     const showForecast = this._config.show_forecast !== false;
@@ -867,7 +948,17 @@ class LiveHeatingCostsCard extends HTMLElement {
         ? this._forecastHtml(mainState, fcState)
         : this._nowHtml(mainState);
 
-    this._card.innerHTML = `<style>${CARD_CSS}</style>${head}${body}`;
+    // Re-rendering replaces the focusable rows, which would throw keyboard
+    // focus back to <body> on every minute tick; put it back on the element
+    // for the same more-info target.
+    const focusKey = this._focusedKey();
+    this._content.innerHTML = `${head}${body}`;
+    if (focusKey) {
+      const target = [...this._content.querySelectorAll("[tabindex]")].find(
+        (el) => el.dataset && el.dataset.moreInfo === focusKey,
+      );
+      if (target && typeof target.focus === "function") target.focus();
+    }
   }
 }
 

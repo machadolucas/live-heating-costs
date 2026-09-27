@@ -47,6 +47,7 @@ _MAIN_KEYS = {
     "buy_price_c_per_kwh",
     "demand_entity_id",
 }
+_EXCLUDED_KEYS = {"name", "subentry_id", "reason", "entity_id"}
 _FORECAST_KEYS = {"integration", "slots", "names", "horizon_end", "has_tomorrow"}
 _FORECAST_SLOT_KEYS = {"start", "end", "costs", "cheapest", "estimated", "partial"}
 
@@ -100,7 +101,7 @@ async def test_cheapest_source_attribute_contract(hass: HomeAssistant) -> None:
         assert set(row.keys()) == _RANKING_KEYS
 
     for row in attrs["excluded"]:
-        assert set(row.keys()) == {"name", "reason", "entity_id"}
+        assert set(row.keys()) == _EXCLUDED_KEYS
 
     # The card opens more-info dialogs from these, so they must be real entities.
     for row in ranking:
@@ -141,3 +142,23 @@ async def test_hub_cost_forecast_attribute_contract(hass: HomeAssistant) -> None
     for slot in attrs["slots"]:
         assert set(slot.keys()) == _FORECAST_SLOT_KEYS
         assert isinstance(slot["partial"], bool)
+
+
+async def test_excluded_rows_carry_subentry_and_entity_ids(hass: HomeAssistant) -> None:
+    """Excluded rows need ``subentry_id`` too: the card keys colours and the
+    forecast legend's more-info chips by it (an excluded pump still has a
+    forecast line), and without it those chips opened nothing."""
+    entry = await _setup_four_sources(hass)
+    coordinator = entry.runtime_data
+    hass.states.async_set("sensor.buy_price", "unavailable")
+    await _tick(hass, 3)
+
+    attrs = CheapestSourceSensor(coordinator).extra_state_attributes
+    excluded = attrs["excluded"]
+    assert {row["name"] for row in excluded} == {"Resistive", "FD25", "RW35"}
+    for row in excluded:
+        assert set(row.keys()) == _EXCLUDED_KEYS
+        assert row["subentry_id"] in coordinator.sources
+        assert coordinator.sources[row["subentry_id"]].name == row["name"]
+        assert row["entity_id"].startswith("sensor.")
+        assert hass.states.get(row["entity_id"]) is not None

@@ -99,10 +99,19 @@ def parse_curve_text(text: str) -> list[tuple[float, float]]:
             data = json.loads(text)
         except json.JSONDecodeError as err:
             raise CurveParseError(f"invalid JSON curve: {err}") from err
-        try:
-            return [(float(p[0]), float(p[1])) for p in data]
-        except (TypeError, ValueError, IndexError) as err:
-            raise CurveParseError(f"invalid JSON curve points: {err}") from err
+        if not isinstance(data, list):
+            raise CurveParseError("JSON curve must be a list of [temp, value] pairs")
+        parsed: list[tuple[float, float]] = []
+        for p in data:
+            # Exactly [t, v]: a dict ({"t":..}) would KeyError on p[0], and a
+            # 3-element row silently dropping its tail hides a typo.
+            if not isinstance(p, list) or len(p) != 2:
+                raise CurveParseError(f"expected a [temp, value] pair, got {p!r}")
+            try:
+                parsed.append((float(p[0]), float(p[1])))
+            except (TypeError, ValueError) as err:
+                raise CurveParseError(f"invalid JSON curve point {p!r}: {err}") from err
+        return parsed
 
     tokens = [t.strip() for t in re.split(r"[,\n]+", text) if t.strip()]
     if not tokens:

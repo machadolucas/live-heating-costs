@@ -337,3 +337,28 @@ def test_static_loose_m3_density_default():
     assert cfg.energy_density_kwh_per_unit == 1000.0
     # 80 €/loose m³ at 75 % efficiency → ~10.67 c/kWh delivered
     assert cfg.cost_eur_per_kwh() == pytest.approx(80.0 / (1000.0 * 0.75))
+
+
+def test_curve_source_negative_standby_raises():
+    from custom_components.live_heating_costs.const import CONF_STANDBY_W
+
+    with pytest.raises(ConfigError) as exc_info:
+        source_from_subentry(_curve_data(**{CONF_STANDBY_W: -1.0}))
+    assert exc_info.value.field == CONF_STANDBY_W
+    # Zero is a legitimate "any draw at all counts as running".
+    assert source_from_subentry(_curve_data(**{CONF_STANDBY_W: 0.0})).standby_w == 0.0
+
+
+@pytest.mark.parametrize(
+    "points",
+    [
+        [{"t": -30, "v": 1.35}, {"t": 7, "v": 4.2}],
+        [[-30, 1.35, 9], [7, 4.2, 9]],
+        [[-30], [7]],
+        [-30, 7],
+    ],
+)
+def test_curve_source_malformed_points_raise_config_error(points):
+    with pytest.raises(ConfigError) as exc_info:
+        source_from_subentry(_curve_data(**{CONF_COP_POINTS: points}))
+    assert exc_info.value.field == CONF_COP_POINTS

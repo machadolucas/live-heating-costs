@@ -2,8 +2,8 @@
 
 Working notes for AI agents and future-me. Read this before changing code.
 
-**Status:** pre-release (`manifest.json` at `0.2.0`, "card clarity +
-compactness" — no tags cut yet). All features described here are implemented
+**Status:** released via HACS/GitHub releases (see `manifest.json` for the
+current version). All features described here are implemented
 and covered by tests — run them (see Dev workflow) before trusting a change.
 See `docs/architecture.md` for the module map and data flow.
 
@@ -115,6 +115,23 @@ to make that bug structurally impossible — see the engine contract below.
   degree-hour accumulation — and a *partial* stall is the dangerous case,
   since a day keeps its full `delivered_kwh` against half its degree-hours and
   teaches the UA learner roughly double the true coefficient.
+- **Input units are normalised at the boundary, once**: price entities by
+  `price_source.unit_scale` (c/kWh, snt/kWh, EUR/MWh -> EUR/kWh; a
+  `price_ct_per_kwh` item key implies cents and overrides the entity unit),
+  temperatures by `temp_source.to_celsius` (°F/K), and energy/power meters by
+  HA's `EnergyConverter`/`PowerConverter` in `coordinator._converted` (Wh ->
+  kWh, kW -> W). An unknown or missing unit keeps the historic assumption
+  (EUR/kWh, °C, kWh, W) rather than guessing a scale.
+- **UA-day integrity** (`coordinator._maybe_roll_day`, `DayAccum`): a day is
+  captured on the first tick after local midnight (the 00:05 job is only a
+  safety net, and the date guard means a day is never captured twice), so a
+  midnight missed while HA was down never merges two days. A sampling gap
+  longer than `SAMPLE_GAP_REBASELINE_S` clears *every* energy baseline instead
+  of crediting the jump (the outage's degree-hours were never observed), and
+  `temp_covered_s` / the DST-aware local day length is passed to `make_row`
+  as `coverage`, gated by `UA_MIN_COVERAGE`. Backfill uses the same gate and
+  only whole local days before today. `ua_learner.ingest` never learns the
+  same date twice.
 - **Missing entity ids are logged, not just silent**: `_warn_missing_entities`
   (first sampling tick onward, once per id) warns for any configured entity
   that is absent from the state machine. A renamed or mistyped id otherwise

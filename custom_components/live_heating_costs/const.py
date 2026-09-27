@@ -132,6 +132,10 @@ FORECAST_REBUILD_MIN = 15
 WEATHER_CACHE_MIN = 30
 DAILY_CAPTURE_HOUR = 0
 DAILY_CAPTURE_MINUTE = 5
+# A sampling gap longer than this (HA restart/outage) re-baselines the energy
+# counters instead of crediting the whole jump: the outage's degree-hours were
+# never observed, so crediting its heat would skew that day's UA ratio.
+SAMPLE_GAP_REBASELINE_S = 3 * SAMPLE_INTERVAL_S
 
 # UA learner
 UA_EWMA_ALPHA_LIVE = 0.15
@@ -141,6 +145,13 @@ UA_SEED_BLEND_SAMPLES = 14  # learned weight = min(n, 14) / 14
 UA_MIN_DEGREE_HOURS = 24.0  # quality gate: below this a day teaches nothing
 UA_DELIVERED_RANGE_KWH = (0.5, 200.0)  # quality gate on daily delivered heat
 UA_ROWS_CAP = 120
+# Quality gate: fraction of the day with a known outdoor temperature. Heat keeps
+# accumulating while degree-hours stall, so a half-observed day would teach
+# roughly twice the true UA.
+UA_MIN_COVERAGE = 0.9
+# Backfill: a recorder day needs this many hourly temperature means (tolerates
+# the 23 h DST day and the odd missing hour) to count as fully observed.
+BACKFILL_MIN_TEMP_HOURS = 22
 
 # Snapshot unavailability reasons (sensor attributes + card display)
 REASON_BELOW_OPERATING_LIMIT = "below_operating_limit"
@@ -151,6 +162,10 @@ REASON_TEMP_UNAVAILABLE = "temp_unavailable"
 STORAGE_VERSION = 1
 STORAGE_KEY_TEMPLATE = f"{DOMAIN}.{{entry_id}}"
 SAVE_DELAY_S = 10
+# The 60 s sampling tick only advances the day accumulator; saving it every
+# minute is ~1,440 fsync'd writes a day for no benefit (HA's final-write hook
+# still flushes on shutdown). Significant events keep using SAVE_DELAY_S.
+SAVE_DELAY_TICK_S = 300
 
 # Services
 SERVICE_LOG_WOOD = "log_wood"

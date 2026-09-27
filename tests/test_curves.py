@@ -202,3 +202,19 @@ def test_points_to_text_round_trips_through_parse():
 
 def test_points_to_text_format():
     assert points_to_text([(-30.0, 1.35), (7.0, 4.2)]) == "-30:1.35, 7:4.2"
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        '[{"t": 1, "v": 2}, {"t": 3, "v": 4}]',  # dicts: used to escape as KeyError
+        "[[1, 2, 3], [4, 5, 6]]",  # 3-element rows
+        "[[1], [2]]",
+        "[1, 2]",
+        '[["a", 2], [3, 4]]',
+        "[[1, null], [3, 4]]",
+    ],
+)
+def test_parse_json_malformed_points_raise_parse_error(text):
+    with pytest.raises(CurveParseError):
+        parse_curve_text(text)

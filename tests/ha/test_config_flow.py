@@ -2,13 +2,16 @@
 
 from __future__ import annotations
 
+from unittest.mock import patch
+
+import pytest
 import voluptuous as vol
 from homeassistant.config_entries import SOURCE_USER, ConfigSubentryData
 from homeassistant.core import HomeAssistant
-from homeassistant.data_entry_flow import FlowResultType
+from homeassistant.data_entry_flow import FlowResultType, InvalidData
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 
-from custom_components.live_heating_costs import curves
+from custom_components.live_heating_costs import curves, models
 from custom_components.live_heating_costs.const import (
     DOMAIN,
     SOURCE_TYPE_CURVE,
@@ -461,3 +464,304 @@ async def test_subentry_reconfigure_static_price_type_stays(hass: HomeAssistant)
     assert updated["price_per_unit_eur"] == 70.0
     assert updated["source_type"] == SOURCE_TYPE_STATIC
     assert updated["fuel_unit"] == "m3"
+
+
+# --------------------------------------------------------------------------- #
+# Reconfigure can clear optional fields (the frontend omits a cleared field)
+# --------------------------------------------------------------------------- #
+
+
+async def test_hub_reconfigure_clears_optional_entities_and_reloads_once(
+    hass: HomeAssistant,
+) -> None:
+    hass.states.async_set(BUY, "0.1")
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        data={
+            **_hub_user_fields(),
+            "weather_entity": "weather.home",
+            "forecast_price_entity": "sensor.price_estimate",
+            "base_temp": 19.5,
+        },
+        unique_id=BUY,
+    )
+    entry.add_to_hass(hass)
+    assert await hass.config_entries.async_setup(entry.entry_id)
+    await hass.async_block_till_done()
+
+    result = await entry.start_reconfigure_flow(hass)
+    result = await hass.config_entries.flow.async_configure(result["flow_id"], _hub_user_fields())
+    assert result["step_id"] == "demand"
+
+    with patch.object(
+        hass.config_entries, "async_reload", wraps=hass.config_entries.async_reload
+    ) as reload:
+        result = await hass.config_entries.flow.async_configure(result["flow_id"], {})
+        await hass.async_block_till_done()
+    assert result["type"] is FlowResultType.ABORT
+    assert result["reason"] == "reconfigure_successful"
+    assert "weather_entity" not in entry.data
+    assert "forecast_price_entity" not in entry.data
+    assert entry.data["buy_price_entity"] == BUY
+    assert entry.data["base_temp"] == 19.5  # demand step default re-submitted
+    # The update listener reloads; the flow itself must not reload again.
+    assert reload.call_count == 1
+
+
+async def test_hub_reconfigure_of_unloaded_entry_reloads_it(hass: HomeAssistant) -> None:
+    """No update listener exists before a successful setup, so the flow must reload."""
+    hass.states.async_set(BUY, "0.1")
+    entry = MockConfigEntry(domain=DOMAIN, data=_hub_user_fields(), unique_id=BUY)
+    entry.add_to_hass(hass)  # never set up: e.g. its setup failed
+
+    result = await entry.start_reconfigure_flow(hass)
+    result = await hass.config_entries.flow.async_configure(result["flow_id"], _hub_user_fields())
+    with patch.object(
+        hass.config_entries, "async_reload", wraps=hass.config_entries.async_reload
+    ) as reload:
+        result = await hass.config_entries.flow.async_configure(result["flow_id"], {})
+        await hass.async_block_till_done()
+    assert result["reason"] == "reconfigure_successful"
+    assert reload.call_count == 1
+
+
+async def test_subentry_reconfigure_curve_clears_stale_climate_and_pump_temp(
+    hass: HomeAssistant,
+) -> None:
+    """The real-world case: a heat pump whose climate/pump-temp entities are gone."""
+    entry = await _hub_entry(
+        hass,
+        subentries_data=[
+            ConfigSubentryData(
+                subentry_type=SUBENTRY_TYPE_SOURCE,
+                title="New ILP",
+                unique_id=None,
+                data={
+                    "name": "New ILP",
+                    "source_type": SOURCE_TYPE_CURVE,
+                    "power_entity": "sensor.ilp_power",
+                    "energy_entity": "sensor.ilp_energy",
+                    "climate_entity": "climate.gone",
+                    "pump_temp_entity": "sensor.gone_outdoor",
+                    "temp_entity_override": "sensor.gone_too",
+                    "preset": "msz_rw35vg",
+                },
+            )
+        ],
+    )
+    subentry_id = next(iter(entry.subentries))
+
+    result = await entry.start_subentry_reconfigure_flow(hass, subentry_id)
+    assert result["step_id"] == "curve_entities"
+    assert _suggested_value(result["data_schema"], "climate_entity") == "climate.gone"
+
+    result = await hass.config_entries.subentries.async_configure(
+        result["flow_id"],
+        {
+            "name": "New ILP",
+            "power_entity": "sensor.ilp_power",
+            "energy_entity": "sensor.ilp_energy",
+        },
+    )
+    assert result["step_id"] == "curve_tables"
+    result = await hass.config_entries.subentries.async_configure(
+        result["flow_id"], {"preset": "msz_rw35vg"}
+    )
+    assert result["type"] is FlowResultType.ABORT
+
+    data = entry.subentries[subentry_id].data
+    for cleared in ("climate_entity", "pump_temp_entity", "temp_entity_override"):
+        assert cleared not in data
+    assert data["power_entity"] == "sensor.ilp_power"
+    assert data["preset"] == "msz_rw35vg"
+    cfg = models.source_from_subentry(data)
+    assert cfg.climate_entity is None
+    assert cfg.pump_temp_entity is None
+
+
+async def test_subentry_reconfigure_dynamic_fixed_clears_energy_entity(
+    hass: HomeAssistant,
+) -> None:
+    entry = await _hub_entry(
+        hass,
+        subentries_data=[
+            ConfigSubentryData(
+                subentry_type=SUBENTRY_TYPE_SOURCE,
+                title="Resistive",
+                unique_id=None,
+                data={
+                    "name": "Resistive",
+                    "source_type": SOURCE_TYPE_DYNAMIC_FIXED,
+                    "cop": 1.0,
+                    "capacity_kw": 9.0,
+                    "energy_entity": "sensor.boiler_energy",
+                },
+            )
+        ],
+    )
+    subentry_id = next(iter(entry.subentries))
+
+    result = await entry.start_subentry_reconfigure_flow(hass, subentry_id)
+    assert result["step_id"] == "dynamic_fixed"
+    result = await hass.config_entries.subentries.async_configure(
+        result["flow_id"], {"name": "Resistive", "cop": 1.0, "capacity_kw": 9.0}
+    )
+    assert result["type"] is FlowResultType.ABORT
+    data = entry.subentries[subentry_id].data
+    assert "energy_entity" not in data
+    assert data["source_type"] == SOURCE_TYPE_DYNAMIC_FIXED
+
+
+async def test_subentry_reconfigure_static_clears_energy_density(hass: HomeAssistant) -> None:
+    entry = await _hub_entry(
+        hass,
+        subentries_data=[
+            ConfigSubentryData(
+                subentry_type=SUBENTRY_TYPE_SOURCE,
+                title="Pellets",
+                unique_id=None,
+                data={
+                    "name": "Pellets",
+                    "source_type": SOURCE_TYPE_STATIC,
+                    "price_per_unit_eur": 0.4,
+                    "fuel_unit": "kg",
+                    "energy_density_kwh_per_unit": 1700,
+                },
+            )
+        ],
+    )
+    subentry_id = next(iter(entry.subentries))
+    result = await entry.start_subentry_reconfigure_flow(hass, subentry_id)
+    assert _suggested_value(result["data_schema"], "energy_density_kwh_per_unit") == 1700
+    result = await hass.config_entries.subentries.async_configure(
+        result["flow_id"], {"name": "Pellets", "price_per_unit_eur": 0.4, "fuel_unit": "kg"}
+    )
+    assert result["type"] is FlowResultType.ABORT
+    data = entry.subentries[subentry_id].data
+    assert "energy_density_kwh_per_unit" not in data
+    cfg = models.source_from_subentry(data)
+    assert cfg.energy_density_kwh_per_unit == pytest.approx(4.1)  # kg default
+
+
+# --------------------------------------------------------------------------- #
+# New static source: no unit-blind 1700 prefill
+# --------------------------------------------------------------------------- #
+
+
+async def test_subentry_add_static_kg_gets_per_unit_density_default(hass: HomeAssistant) -> None:
+    entry = await _hub_entry(hass)
+    result = await hass.config_entries.subentries.async_init(
+        (entry.entry_id, SUBENTRY_TYPE_SOURCE), context={"source": SOURCE_USER}
+    )
+    result = await hass.config_entries.subentries.async_configure(
+        result["flow_id"], {"name": "Pellet stove", "source_type": SOURCE_TYPE_STATIC}
+    )
+    assert result["step_id"] == "static"
+    assert _suggested_value(result["data_schema"], "energy_density_kwh_per_unit") is None
+
+    result = await hass.config_entries.subentries.async_configure(
+        result["flow_id"], {"price_per_unit_eur": 0.4, "fuel_unit": "kg"}
+    )
+    assert result["type"] is FlowResultType.CREATE_ENTRY
+    assert "energy_density_kwh_per_unit" not in result["data"]
+    cfg = models.source_from_subentry(result["data"])
+    assert cfg.energy_density_kwh_per_unit == pytest.approx(4.1)
+
+
+# --------------------------------------------------------------------------- #
+# Curve tables: an edited preset is stored as custom
+# --------------------------------------------------------------------------- #
+
+
+async def _curve_tables_form(hass: HomeAssistant, name: str):
+    entry = await _hub_entry(hass)
+    result = await hass.config_entries.subentries.async_init(
+        (entry.entry_id, SUBENTRY_TYPE_SOURCE), context={"source": SOURCE_USER}
+    )
+    result = await hass.config_entries.subentries.async_configure(
+        result["flow_id"], {"name": name, "source_type": SOURCE_TYPE_CURVE}
+    )
+    result = await hass.config_entries.subentries.async_configure(
+        result["flow_id"],
+        {"power_entity": "sensor.p_power", "energy_entity": "sensor.p_energy"},
+    )
+    assert result["step_id"] == "curve_tables"
+    return result
+
+
+async def test_curve_tables_edited_preset_text_becomes_custom(hass: HomeAssistant) -> None:
+    fd25 = curves.PRESETS["msz_fd25va"]
+    result = await _curve_tables_form(hass, "Tweaked FD25")
+    result = await hass.config_entries.subentries.async_configure(
+        result["flow_id"],
+        {
+            "preset": "msz_fd25va",
+            "cop_points": "-20:2.0, 0:3.1, 10:4.0",  # edited
+            "capacity_points": curves.points_to_text(fd25.capacity_points),
+            "operating_limit_c": fd25.operating_limit_c,
+            "min_cop": fd25.min_cop,
+            "max_cop": 5.0,  # edited too
+        },
+    )
+    assert result["type"] is FlowResultType.CREATE_ENTRY
+    data = result["data"]
+    assert data["preset"] == "custom"
+    assert data["cop_points"] == [[-20.0, 2.0], [0.0, 3.1], [10.0, 4.0]]
+    assert data["capacity_points"] == [list(p) for p in fd25.capacity_points]
+    assert data["operating_limit_c"] == fd25.operating_limit_c
+    assert data["max_cop"] == 5.0
+    cfg = models.source_from_subentry(data)
+    assert cfg.preset_key is None
+
+
+async def test_curve_tables_preset_reformatted_text_stays_preset(hass: HomeAssistant) -> None:
+    fd25 = curves.PRESETS["msz_fd25va"]
+    result = await _curve_tables_form(hass, "Plain FD25")
+    reformatted = "\n".join(f"{x}:{y}" for x, y in reversed(fd25.cop_points))
+    result = await hass.config_entries.subentries.async_configure(
+        result["flow_id"], {"preset": "msz_fd25va", "cop_points": reformatted}
+    )
+    assert result["type"] is FlowResultType.CREATE_ENTRY
+    assert result["data"]["preset"] == "msz_fd25va"
+
+
+async def test_curve_tables_edited_preset_bad_text_errors_then_saves_custom(
+    hass: HomeAssistant,
+) -> None:
+    result = await _curve_tables_form(hass, "Typo FD25")
+    result = await hass.config_entries.subentries.async_configure(
+        result["flow_id"], {"preset": "msz_fd25va", "cop_points": "-20:2.0, oops"}
+    )
+    assert result["type"] is FlowResultType.FORM
+    assert result["errors"]["cop_points"] == "invalid_curve_format"
+    assert _default_value(result["data_schema"], "preset") == "custom"
+
+    # Resubmitting as "custom" is accepted, not treated as a dropdown change.
+    result = await hass.config_entries.subentries.async_configure(
+        result["flow_id"],
+        {
+            "preset": "custom",
+            "cop_points": "-20:2.0, 10:4.0",
+            "capacity_points": "-20:2.0, 10:6.0",
+            "operating_limit_c": -25.0,
+            "min_cop": 0.5,
+            "max_cop": 6.0,
+        },
+    )
+    assert result["type"] is FlowResultType.CREATE_ENTRY
+    assert result["data"]["cop_points"] == [[-20.0, 2.0], [10.0, 4.0]]
+
+
+async def test_curve_entities_rejects_negative_standby(hass: HomeAssistant) -> None:
+    entry = await _hub_entry(hass)
+    result = await hass.config_entries.subentries.async_init(
+        (entry.entry_id, SUBENTRY_TYPE_SOURCE), context={"source": SOURCE_USER}
+    )
+    result = await hass.config_entries.subentries.async_configure(
+        result["flow_id"], {"name": "Pump", "source_type": SOURCE_TYPE_CURVE}
+    )
+    with pytest.raises(InvalidData):
+        await hass.config_entries.subentries.async_configure(
+            result["flow_id"],
+            {"power_entity": "sensor.p", "energy_entity": "sensor.e", "standby_w": -5},
+        )
