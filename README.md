@@ -300,3 +300,14 @@ for architecture and design notes.
 ## License
 
 MIT © Lucas Machado
+
+### Whole-house demand and Parmair shadow estimates
+
+Optional [shadow-model configuration](docs/demand-model.md) adds a separate
+21 °C comfort target, air/fabric temperature prediction, individual energy-meter
+checks, total/continuing/remaining heat estimates, and manufacturer-based Parmair
+120 ventilation estimates. Airflows remain unavailable until installation
+calibration is defensible; measured bounds and reasons are published instead.
+Legacy demand stays active by default. Promotion requires at least four weeks
+of distributed validation, 15% better temperature MAE against both baselines,
+energy consistency, and explicit calibration. All outputs remain advisory.

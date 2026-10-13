@@ -189,3 +189,19 @@ requests coalesced, prices read after the weather await):
 See the per-module docstrings (especially `blend.py`, `ua_learner.py`,
 `forecast.py`, and `cost_engine.py`) for the calculation details; this doc is
 the map, not a substitute for reading them before changing behavior.
+
+## Optional whole-house shadow model
+
+`shadow_config.py` validates portable expert configuration. `shadow.py` is the HA
+boundary for `telemetry.py` counter integrity, `ventilation.py` manufacturer
+interpolation, `thermal.py` air/fabric dynamics, `allocation.py` room constraints,
+and `calibration.py` chronological validation. Pure modules take explicit UTC
+timestamps and never access HA. The legacy demand path and entity identities
+remain available; no model actuates devices.
+
+Five-minute features and pre-issued one-hour forecasts are retained for 90 days
+in the existing Store under a versioned `shadow` payload. Configuration changes
+invalidate validation evidence. Calibration readiness is cached between new
+features; full feature histories are excluded from sensor attributes. Offline
+bounded fitting runs through the host heavy-job wrapper. See
+[demand-model.md](demand-model.md) for calibration and activation requirements.

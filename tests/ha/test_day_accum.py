@@ -129,7 +129,7 @@ async def test_shadow_mae_scores_the_prediction_made_before_learning(
     assert state.last_predicted_kwh is None
 
 
-async def test_sampling_gap_rebaselines_energy_counters(hass: HomeAssistant) -> None:
+async def test_sampling_gap_rebaselines_energy_counters(hass: HomeAssistant, freezer) -> None:
     hass.states.async_set("sensor.buy_price", "0.10")
     hass.states.async_set("sensor.outdoor_temp", "-5.0")
     hass.states.async_set("sensor.resistive_energy", "100.0")
@@ -137,6 +137,7 @@ async def test_sampling_gap_rebaselines_energy_counters(hass: HomeAssistant) -> 
         hass, [resistive_subentry(cop=1.0, energy_entity="sensor.resistive_energy")]
     )
     coordinator = entry.runtime_data
+    freezer.tick(SAMPLE_INTERVAL_S)
     await _tick(hass, SAMPLE_INTERVAL_S + 5)  # seeds the baseline
     assert coordinator.day_accum.last_tick_utc is not None
 
@@ -144,6 +145,7 @@ async def test_sampling_gap_rebaselines_energy_counters(hass: HomeAssistant) -> 
     # sampled, so the jump is re-baselined, not credited.
     coordinator.day_accum.last_tick_utc = dt_util.utcnow() - timedelta(minutes=10)
     hass.states.async_set("sensor.resistive_energy", "105.0")
+    freezer.tick(SAMPLE_INTERVAL_S)
     await _tick(hass, SAMPLE_INTERVAL_S + 5)
     assert coordinator.day_accum.electricity_kwh == 0.0
     assert coordinator.day_accum.delivered_kwh == 0.0
@@ -151,9 +153,10 @@ async def test_sampling_gap_rebaselines_energy_counters(hass: HomeAssistant) -> 
     assert coordinator.day_accum.last_energy_counters[sub_id] == pytest.approx(105.0)
 
     # Normal cadence resumes crediting deltas.
-    hass.states.async_set("sensor.resistive_energy", "106.0")
+    hass.states.async_set("sensor.resistive_energy", "105.015")
+    freezer.tick(SAMPLE_INTERVAL_S)
     await _tick(hass, SAMPLE_INTERVAL_S + 5)
-    assert coordinator.day_accum.electricity_kwh == pytest.approx(1.0)
+    assert coordinator.day_accum.electricity_kwh == pytest.approx(0.015)
 
 
 async def test_temperature_coverage_tracks_ticks_with_a_reading(hass: HomeAssistant) -> None:

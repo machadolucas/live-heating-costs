@@ -94,6 +94,7 @@ from .const import (
     SOURCE_TYPES,
     SUBENTRY_TYPE_SOURCE,
 )
+from .shadow_config import CONF_SHADOW, validate_config
 
 DEFAULT_HUB_NAME = "Live Heating Costs"
 
@@ -248,6 +249,9 @@ def _demand_schema(mode: str, defaults: dict) -> vol.Schema:
                 CONF_UA_LEARNING, default=defaults.get(CONF_UA_LEARNING, DEFAULT_UA_LEARNING)
             ): selector.BooleanSelector(),
             vol.Optional(
+                CONF_SHADOW, description={"suggested_value": defaults.get(CONF_SHADOW, {})}
+            ): selector.ObjectSelector(),
+            vol.Optional(
                 CONF_BACKFILL_DAYS,
                 default=defaults.get(CONF_BACKFILL_DAYS, DEFAULT_BACKFILL_DAYS),
             ): selector.NumberSelector(
@@ -302,6 +306,15 @@ class LiveHeatingCostsConfigFlow(ConfigFlow, domain=DOMAIN):
             # (e.g. a UA seed while temporarily on an external demand entity)
             # survive a mode switch untouched.
             data = _merge_step(self._hub_data, _demand_schema(mode, {}), user_input)
+            try:
+                if CONF_SHADOW in data:
+                    data[CONF_SHADOW] = validate_config(data[CONF_SHADOW])
+            except (ValueError, TypeError):
+                return self.async_show_form(
+                    step_id="demand",
+                    data_schema=_demand_schema(mode, data),
+                    errors={CONF_SHADOW: "invalid_shadow_config"},
+                )
             if self.source == SOURCE_RECONFIGURE:
                 entry = self._get_reconfigure_entry()
                 title = data.get(CONF_NAME, entry.title)

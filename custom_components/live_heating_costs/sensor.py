@@ -48,6 +48,12 @@ async def async_setup_entry(
             HeatingDemandSensor(coordinator),
             UaCoefficientSensor(coordinator),
             HubCostForecastSensor(coordinator),
+            ShadowValueSensor(coordinator, "shadow_demand", "total_kw", "kW"),
+            ShadowValueSensor(coordinator, "remaining_demand", "remaining_kw", "kW"),
+            ShadowValueSensor(coordinator, "expected_delivery", "expected_delivery_kw", "kW"),
+            ShadowValueSensor(coordinator, "parmair_supply_airflow", "supply", "L/s"),
+            ShadowValueSensor(coordinator, "parmair_extract_airflow", "extract", "L/s"),
+            ShadowStatusSensor(coordinator),
         ]
     )
 
@@ -251,7 +257,7 @@ class SourceCostForecastSensor(LiveHeatingCostsEntity, SensorEntity):
 class CheapestSourceSensor(LiveHeatingCostsHubEntity, SensorEntity):
     """State = cheapest dispatchable source's name; attributes = card contract."""
 
-    _unrecorded_attributes = frozenset({"ranking", "excluded"})
+    _unrecorded_attributes = frozenset({"ranking", "excluded", "shadow"})
 
     def __init__(self, coordinator: LiveHeatingCostsCoordinator) -> None:
         super().__init__(coordinator, "cheapest_source")
@@ -323,6 +329,10 @@ class CheapestSourceSensor(LiveHeatingCostsHubEntity, SensorEntity):
 
         return {
             "integration": DOMAIN,
+            "shadow": self.coordinator.shadow.result,
+            "shadow_entity_id": _entity_id_for(
+                hass, f"{self.coordinator.config_entry.entry_id}_shadow_demand"
+            ),
             "ranking": ranking,
             "excluded": excluded,
             "demand_kw": round(demand_kw, 2) if demand_kw is not None else None,
@@ -480,4 +490,51 @@ class HubCostForecastSensor(LiveHeatingCostsHubEntity, SensorEntity):
             # Time-dependent, so evaluated on every write (cheaply, from the cache).
             "has_tomorrow": real_end is not None
             and (real_end - dt_util.utcnow()) > timedelta(hours=12),
+        }
+
+
+class ShadowValueSensor(LiveHeatingCostsHubEntity, SensorEntity):
+    """Estimated thermal/airflow telemetry, distinct from the active demand sensor."""
+
+    _attr_state_class = SensorStateClass.MEASUREMENT
+    _unrecorded_attributes = frozenset({"model"})
+
+    def __init__(self, coordinator, key, field, unit):
+        super().__init__(coordinator, key)
+        self._field = field
+        self._attr_native_unit_of_measurement = unit
+        if unit == "kW":
+            self._attr_device_class = SensorDeviceClass.POWER
+
+    @property
+    def native_value(self):
+        result = self.coordinator.shadow.result
+        if self._field in ("supply", "extract"):
+            value = ((result.get("ventilation") or {}).get(self._field) or {}).get("flow_ls")
+        else:
+            value = result.get(self._field)
+        return round(value, 3) if value is not None else None
+
+    @property
+    def extra_state_attributes(self):
+        return {"model": self.coordinator.shadow.result, "measurement_type": "estimated"}
+
+
+class ShadowStatusSensor(LiveHeatingCostsHubEntity, SensorEntity):
+    """Validation evidence; time alone never enables the new allocation."""
+
+    _unrecorded_attributes = frozenset({"validation", "quality_reasons"})
+
+    def __init__(self, coordinator):
+        super().__init__(coordinator, "shadow_status")
+
+    @property
+    def native_value(self):
+        return self.coordinator.shadow.result["status"]
+
+    @property
+    def extra_state_attributes(self):
+        return {
+            "validation": self.coordinator.shadow.validation(),
+            "quality_reasons": self.coordinator.shadow.result.get("quality_reasons", []),
         }

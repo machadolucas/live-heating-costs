@@ -72,7 +72,7 @@ async def test_fahrenheit_temperature_sensor_is_converted(hass: HomeAssistant) -
     assert coordinator.data.temp_24h_mean == pytest.approx(-5.0)
 
 
-async def test_wh_energy_and_kw_power_are_converted(hass: HomeAssistant) -> None:
+async def test_wh_energy_and_kw_power_are_converted(hass: HomeAssistant, freezer) -> None:
     # A Wh counter read as kWh would credit 1000x the electricity (and heat);
     # a kW power reading would never clear the W standby threshold.
     hass.states.async_set("sensor.outdoor_temp", "-5.0")
@@ -82,15 +82,18 @@ async def test_wh_energy_and_kw_power_are_converted(hass: HomeAssistant) -> None
     entry = await async_setup_hub(hass, [_fd25()])
     coordinator = entry.runtime_data
     sub_id = next(iter(coordinator.sources))
+    freezer.tick(SAMPLE_INTERVAL_S)
     await _tick(hass, SAMPLE_INTERVAL_S + 5)
+    freezer.tick(SAMPLE_INTERVAL_S)
     await _tick(hass, SAMPLE_INTERVAL_S)
-    hass.states.async_set("sensor.fd25_energy", "100500", {"unit_of_measurement": "Wh"})
+    hass.states.async_set("sensor.fd25_energy", "100020", {"unit_of_measurement": "Wh"})
+    freezer.tick(SAMPLE_INTERVAL_S)
     await _tick(hass, SAMPLE_INTERVAL_S)
 
     sample = coordinator._samples[sub_id][-1]
     assert sample.power_w == pytest.approx(1200.0)
-    assert sample.energy_kwh == pytest.approx(100.5)
-    assert coordinator.day_accum.electricity_kwh == pytest.approx(0.5)
+    assert sample.energy_kwh == pytest.approx(100.02)
+    assert coordinator.day_accum.electricity_kwh == pytest.approx(0.02)
 
 
 async def test_meter_unavailable_across_a_gap_is_rebaselined(hass: HomeAssistant) -> None:

@@ -180,7 +180,7 @@ the card never parses a name or subentry id into a guessed entity id.
   source's colour and its forecast-legend chip, which an excluded source can
   still have), `demand_kw`, `demand_covered`,
   `shortfall_kw`, `blended_cost_c_per_kwh`, `demand_entity_id` (the
-  heating-demand sensor, for the demand pill's more-info).
+  heating-demand sensor, for the demand pill's more-info), `shadow` (the optional whole-house model snapshot) and `shadow_entity_id` (resolved estimated requirement sensor). The shadow pill shows total and remaining kW separately; unknown remaining heat stays unknown. `shadow.active` is false until independent calibration and chronological validation pass. The snapshot also exposes `expected_delivery_kw`, quality reasons, source provenance, airflow bounds, and validation evidence.
 - **Forecast sensor** (`forecast_entity`) — attributes: `slots` (array of
   `{start, end, costs: {subentry_id: cost_c_per_kwh|null}, cheapest,
   estimated, partial}`), `names` (`{subentry_id: display_name}`),
@@ -208,6 +208,10 @@ by the card — if a field is renamed there, update
 to match.
 
 ## Notes
+
+The comfort-target number defaults to 21 °C and does not change pump setpoints.
+See [Demand model](demand-model.md) for optional configuration and commissioning.
+
 
 - Plain JavaScript, no build step, one file:
   `custom_components/live_heating_costs/frontend/live-heating-costs-card.js`.

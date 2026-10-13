@@ -37,6 +37,8 @@ _RANKING_KEYS = {
     "entity_id",
 }
 _MAIN_KEYS = {
+    "shadow",
+    "shadow_entity_id",
     "integration",
     "ranking",
     "excluded",

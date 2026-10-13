@@ -420,7 +420,11 @@ class LiveHeatingCostsCard extends HTMLElement {
             a.blended_cost_c_per_kwh,
           )} c/kWh</span>`
         : "";
-    const meta = pill || mix ? `<span class="meta">${pill}${mix}</span>` : "";
+    const s = a.shadow;
+    const shadow = s && s.status !== "disabled"
+      ? `<span class="pill" data-more-info="${esc(a.shadow_entity_id || "")}" title="One-hour estimate. Current-operation continuation is a scenario; calibration and validation are required before activation.">${s.active ? "Validated" : "Shadow"}: ${s.total_kw == null ? "awaiting inputs" : `${fmt1(s.total_kw)} kW total · ${s.remaining_kw == null ? "unknown" : fmt1(s.remaining_kw)} kW remaining`}</span>`
+      : "";
+    const meta = pill || mix || shadow ? `<span class="meta">${pill}${mix}${shadow}</span>` : "";
     return `<div class="head"><span class="title">${esc(title)}</span>${meta}${
       showForecast ? this._toggleHtml() : ""
     }</div>`;
@@ -430,7 +434,7 @@ class LiveHeatingCostsCard extends HTMLElement {
 
   _rowHtml(r, isCheapest) {
     const dot = r.active ? `<span class="dot" title="active"></span>` : "";
-    const measured = r.measured_blend ? `<span class="chip">measured</span>` : "";
+    const measured = r.measured_blend ? `<span class="chip" title="COP model reconciled with metered electricity; not a heat meter">adjusted COP</span>` : "";
     const covers =
       r.allocated_kw > 0
         ? `<span class="chip ok" title="Share of the current demand assigned to this source (cheapest-first)">covers ${fmt1(

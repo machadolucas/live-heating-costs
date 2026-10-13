@@ -93,6 +93,7 @@ from .models import (
     StaticSourceConfig,
 )
 from .persistence import RuntimeStore
+from .shadow import ShadowModel
 from .ua_learner import UaState
 
 _LOGGER = logging.getLogger(__name__)
@@ -186,6 +187,7 @@ class DayAccum:
     last_energy_counters: dict[str, float] = field(default_factory=dict)
     last_tick_utc: datetime | None = None
     temp_covered_s: float = 0.0
+    heat_covered_s: dict[str, float] = field(default_factory=dict)
 
     def coverage(self) -> float:
         """Fraction (0-1) of this local day with a known outdoor temperature."""
@@ -208,6 +210,7 @@ class DayAccum:
             "last_energy_counters": dict(self.last_energy_counters),
             "last_tick_utc": self.last_tick_utc.isoformat() if self.last_tick_utc else None,
             "temp_covered_s": self.temp_covered_s,
+            "heat_covered_s": dict(self.heat_covered_s),
         }
 
     @classmethod
@@ -230,6 +233,7 @@ class DayAccum:
             last_energy_counters=dict(d.get("last_energy_counters", {})),
             last_tick_utc=last_tick,
             temp_covered_s=float(d.get("temp_covered_s", 0.0)),
+            heat_covered_s=dict(d.get("heat_covered_s", {})),
         )
 
 
@@ -288,6 +292,7 @@ class LiveHeatingCostsCoordinator(DataUpdateCoordinator[HubData]):
         # parse is skipped (logged) rather than breaking hub setup.
         self.sources: dict[str, SourceConfig] = {}
         self._parse_sources()
+        self.shadow = ShadowModel(self)
 
         # Per-source extras the sensor platform will want (temp used, modeled
         # capacity, window energy, …) that don't belong on SourceSnapshot.
@@ -356,6 +361,7 @@ class LiveHeatingCostsCoordinator(DataUpdateCoordinator[HubData]):
     async def async_load_runtime(self) -> None:
         """Restore UA state / day accumulator / wood log from the Store."""
         data = await self.store.async_load()
+        self.shadow.restore(data.get("shadow", {}))
         ua_raw = data.get("ua")
         self.ua_state = (
             replace(UaState.from_dict(ua_raw), seed=self._ua_seed_kw_per_c)
@@ -383,6 +389,7 @@ class LiveHeatingCostsCoordinator(DataUpdateCoordinator[HubData]):
     def store_snapshot(self) -> dict:
         """The full persisted state as a JSON-safe dict."""
         return {
+            "shadow": self.shadow.to_dict(),
             "ua": self.ua_state.to_dict(),
             "day_accum": self.day_accum.to_dict(),
             "wood_log": self.wood_log[-500:],
@@ -394,7 +401,7 @@ class LiveHeatingCostsCoordinator(DataUpdateCoordinator[HubData]):
     @callback
     def async_setup_listeners(self) -> None:
         """Wire the sampling tick, forecast rebuild, daily capture and state watchers."""
-        watched: set[str] = set()
+        watched: set[str] = set(self.shadow.watched)
         event_mode_entities: set[str] = set()
         # The weather entity is watched too: while the outdoor sensor is down
         # it *is* the temperature source, so its updates must drive a recompute.
@@ -751,10 +758,39 @@ class LiveHeatingCostsCoordinator(DataUpdateCoordinator[HubData]):
         temp_24h_mean = self._temp_24h_mean()
         ua_effective = ua_learner.effective_ua(self.ua_state)
         demand_kw = self._compute_demand_kw(ua_effective, temp_24h_mean)
+        if self.shadow.result.get("active"):
+            self.shadow.refresh_allocations(snapshots, dt_util.utcnow())
+        advanced = self.shadow.result if self._demand_mode == DEMAND_MODE_INTERNAL else {}
+        if advanced.get("active"):
+            demand_kw = advanced["total_allocation"]["total_kw"]
         if demand_kw is None:
             allocations, demand_covered, blended_cost = [], None, None
         else:
             allocations, demand_covered, blended_cost = merit_order(demand_kw, ranked)
+            if advanced.get("active"):
+                from .cost_engine import Allocation
+
+                amounts = {}
+                for row in advanced["total_allocation"]["allocations"]:
+                    amounts[row["source_id"]] = amounts.get(row["source_id"], 0) + row["kw"]
+                allocations = [
+                    Allocation(
+                        s.subentry_id,
+                        s.name,
+                        amounts[s.subentry_id],
+                        amounts[s.subentry_id] / s.capacity_kw if s.capacity_kw else 0,
+                        s.cost_eur_per_kwh,
+                    )
+                    for s in ranked
+                    if amounts.get(s.subentry_id, 0) > 0
+                ]
+                demand_covered = advanced["total_allocation"]["uncovered_kw"] <= 1e-6
+                supplied = sum(a.kw for a in allocations)
+                blended_cost = (
+                    sum(a.kw * a.cost_eur_per_kwh for a in allocations) / supplied
+                    if supplied
+                    else None
+                )
 
         return HubData(
             snapshots=snapshots,
@@ -799,7 +835,8 @@ class LiveHeatingCostsCoordinator(DataUpdateCoordinator[HubData]):
         after a sampling gap, whose energy was spent while no degree-hours
         (and no COP) were being observed.
         """
-        if energy_kwh is None:
+        if energy_kwh is None or not math.isfinite(energy_kwh) or energy_kwh < 0:
+            self.day_accum.last_energy_counters.pop(subentry_id, None)
             return
         last = self.day_accum.last_energy_counters.get(subentry_id)
         self.day_accum.last_energy_counters[subentry_id] = energy_kwh
@@ -808,6 +845,18 @@ class LiveHeatingCostsCoordinator(DataUpdateCoordinator[HubData]):
         delta_e = energy_kwh - last
         if delta_e <= 0:
             return  # counter reset or no movement — nothing to fold in
+        # A physical upper bound catches plausible-looking reset artifacts before
+        # they reach the daily learner. Per-source settings may tighten the bound.
+        max_kw = (
+            self.shadow.config.get("sources", {}).get(subentry_id, {}).get("max_electric_kw", 20.0)
+        )
+        elapsed = (
+            (dt_util.utcnow() - self.day_accum.last_tick_utc).total_seconds()
+            if self.day_accum.last_tick_utc
+            else SAMPLE_INTERVAL_S
+        )
+        if delta_e > max_kw * max(elapsed, 0) / 3600 * 1.05:
+            return
         self.day_accum.electricity_kwh += delta_e
         if cop is not None and cop > 0:
             delivered = delta_e * cop
@@ -853,7 +902,7 @@ class LiveHeatingCostsCoordinator(DataUpdateCoordinator[HubData]):
                 ids.append(cfg.energy_entity)
             elif isinstance(cfg, StaticSourceConfig):
                 ids.append(cfg.activity.entity)
-        return [e for e in ids if e]
+        return [e for e in ids if e] + sorted(self.shadow.watched)
 
     def _warn_missing_entities(self) -> None:
         """Log once per configured entity id that does not exist at all.
@@ -912,13 +961,19 @@ class LiveHeatingCostsCoordinator(DataUpdateCoordinator[HubData]):
         """Log a finished day into the UA learner (internal demand mode only)."""
         if self._demand_mode != DEMAND_MODE_INTERNAL or not self._ua_learning:
             return
+        coverage = accum.coverage()
+        if self.shadow.config:
+            length = history.local_day_length_s(accum.date)
+            coverage = min(
+                [coverage, *(accum.heat_covered_s.get(sid, 0) / length for sid in self.sources)]
+            )
         row = ua_learner.make_row(
             date=accum.date,
             degree_hours=accum.degree_hours,
             delivered_kwh=accum.delivered_kwh,
             electricity_kwh=accum.electricity_kwh,
             wood_kwh=accum.wood_kwh,
-            coverage=accum.coverage(),
+            coverage=coverage,
         )
         # Predict *before* ingesting: scoring the model after it has already
         # learned from this very day would be an in-sample (flattering) MAE.
@@ -974,7 +1029,21 @@ class LiveHeatingCostsCoordinator(DataUpdateCoordinator[HubData]):
         # the sample just appended) is also what converts this tick's energy
         # delta into delivered heat.
         data = self.build_hub_data()
+        self.shadow.sample(now, data.snapshots, data.ua_effective, hub_temp)
         for subentry_id, cfg in self.sources.items():
+            mapping = self.shadow.config.get("sources", {}).get(subentry_id, {})
+            if mapping.get("energy_entities"):
+                row = self.shadow.result.get("sources", {}).get(subentry_id, {})
+                electric = row.get("electric_kwh")
+                snap = data.snapshots.get(subentry_id)
+                if electric is not None and snap and snap.cop is not None:
+                    accum.electricity_kwh += electric
+                    delivered = electric * snap.cop
+                    accum.delivered_kwh += delivered
+                    accum.per_source_kwh[subentry_id] = (
+                        accum.per_source_kwh.get(subentry_id, 0) + delivered
+                    )
+                continue
             if isinstance(cfg, CurveSourceConfig):
                 snap = data.snapshots.get(subentry_id)
                 self._accumulate_metered_energy(
@@ -993,10 +1062,17 @@ class LiveHeatingCostsCoordinator(DataUpdateCoordinator[HubData]):
                     )
             elif isinstance(cfg, StaticSourceConfig):
                 self._accumulate_static_duration(subentry_id, cfg)
+        if self.shadow.config and last_tick is not None and not rebaseline:
+            elapsed = max(0, (now - last_tick).total_seconds())
+            for sid, row in self.shadow.result.get("sources", {}).items():
+                if row.get("heat_kw") is not None and not row.get("reasons"):
+                    accum.heat_covered_s[sid] = accum.heat_covered_s.get(sid, 0) + elapsed
         accum.last_tick_utc = now
 
         self.store.schedule_save(self.store_snapshot(), SAVE_DELAY_TICK_S)
-        self.async_set_updated_data(data)
+        self.async_set_updated_data(
+            self.build_hub_data() if self.shadow.result.get("active") else data
+        )
 
     # ------------------------------------------------------------------ #
     # State-change-driven recompute (debounced) + wood event accounting

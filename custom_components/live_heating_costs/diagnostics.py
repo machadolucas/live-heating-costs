@@ -60,6 +60,8 @@ async def async_get_config_entry_diagnostics(
         }
 
     return {
+        "shadow": _serialize(coordinator.shadow.result),
+        "shadow_validation": coordinator.shadow.validation(),
         "hub": dict(entry.data),
         "sources": sources,
         "data": hub,

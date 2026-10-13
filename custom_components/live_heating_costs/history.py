@@ -19,6 +19,7 @@ seed its 24 h temperature history after a restart.
 from __future__ import annotations
 
 import logging
+import math
 from collections import defaultdict
 from datetime import date, datetime, timedelta
 
@@ -29,6 +30,8 @@ from homeassistant.util import dt as dt_util
 from . import ua_learner
 from .const import BACKFILL_MIN_TEMP_HOURS, DEMAND_MODE_INTERNAL, SAVE_DELAY_S
 from .models import CurveSourceConfig, DynamicFixedConfig
+from .telemetry import validate_counter_delta
+from .temp_source import PLAUSIBLE_TEMP_RANGE_C
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -124,6 +127,10 @@ async def async_backfill(hass: HomeAssistant, coordinator) -> int:
         return 0
     if not coordinator._outdoor_temp_entity:
         return 0
+
+    shadow_config = getattr(getattr(coordinator, "shadow", None), "config", {})
+    if shadow_config:
+        return await _async_backfill_strict(hass, coordinator, shadow_config)
 
     metered_sources: dict[str, CurveSourceConfig | DynamicFixedConfig] = {
         sub_id: cfg
@@ -228,6 +235,140 @@ async def async_backfill(hass: HomeAssistant, coordinator) -> int:
     coordinator.ua_state = state
     # The recorder answered, so this history has been mined — even when it
     # taught nothing, re-querying it on every reload won't change that.
+    coordinator.backfill_done = True
+    coordinator.store.schedule_save(coordinator.store_snapshot(), SAVE_DELAY_S)
+    return ingested
+
+
+async def _async_backfill_strict(hass: HomeAssistant, coordinator, shadow_config: dict) -> int:
+    """Optional-profile backfill requires all configured heat inputs, not a subtotal.
+
+    Hourly energy statistics permit physical increment checks and independent
+    floor-meter mappings. Missing intervals or unquantified fuel/radiators keep
+    rows visible but ineligible; this history never certifies shadow readiness.
+    """
+    mappings = shadow_config.get("sources", {})
+    source_meters = {}
+    for sid, cfg in coordinator.sources.items():
+        if isinstance(cfg, CurveSourceConfig | DynamicFixedConfig):
+            source_meters[sid] = mappings.get(sid, {}).get("energy_entities") or (
+                [cfg.energy_entity] if cfg.energy_entity else []
+            )
+        else:
+            # Activity timers/events cannot certify historical delivered heat.
+            source_meters[sid] = []
+    all_meters = [eid for meters in source_meters.values() for eid in meters]
+    ids = set(all_meters)
+    if len(all_meters) != len(ids):
+        _LOGGER.info("Strict recorder backfill refused duplicate source meter assignments")
+        return 0
+    if not ids:
+        return 0
+    end = dt_util.as_utc(dt_util.start_of_local_day(dt_util.now().date()))
+    start = dt_util.as_utc(
+        dt_util.start_of_local_day(
+            dt_util.as_local(end).date() - timedelta(days=min(coordinator._backfill_days, 90))
+        )
+    )
+    try:
+        instance = get_instance(hass)
+        temp_stats = await instance.async_add_executor_job(
+            statistics_during_period,
+            hass,
+            start,
+            end,
+            {coordinator._outdoor_temp_entity},
+            "hour",
+            _TEMP_UNITS,
+            {"mean"},
+        )
+        energy_stats = await instance.async_add_executor_job(
+            statistics_during_period, hass, start, end, ids, "hour", _ENERGY_UNITS, {"change"}
+        )
+    except Exception as err:  # noqa: BLE001 - recorder is best-effort
+        _LOGGER.info("Strict recorder backfill unavailable: %s", err)
+        return 0
+    temperatures = {}
+    for row in temp_stats.get(coordinator._outdoor_temp_entity, []):
+        at, mean = _row_start(row["start"]), row.get("mean")
+        if (
+            mean is not None
+            and math.isfinite(mean)
+            and PLAUSIBLE_TEMP_RANGE_C[0] <= mean <= PLAUSIBLE_TEMP_RANGE_C[1]
+            and start <= at < end
+        ):
+            temperatures[at] = float(mean)
+    changes = {
+        eid: {
+            _row_start(row["start"]): row.get("change")
+            for row in energy_stats.get(eid, [])
+            if start <= _row_start(row["start"]) < end
+        }
+        for eid in ids
+    }
+    # No synthesised historical temperatures or energy: only observed hours.
+    degree_hours, electricity, delivered = (
+        defaultdict(float),
+        defaultdict(float),
+        defaultdict(float),
+    )
+    temp_hours, covered = defaultdict(set), defaultdict(lambda: defaultdict(set))
+    for at, temp in sorted(temperatures.items()):
+        day = _day_key(at)
+        degree_hours[day] += max(coordinator._base_temp - temp, 0)
+        temp_hours[day].add(at)
+    for sid, meters in source_meters.items():
+        if not meters:
+            continue
+        cfg = coordinator.sources[sid]
+        maximum = mappings.get(sid, {}).get("max_electric_kw", 20)
+        hours = set.intersection(*(set(changes[eid]) for eid in meters))
+        for at in sorted(hours):
+            values = [changes[eid][at] for eid in meters]
+            if any(value is None or value < 0 for value in values):
+                continue
+            change = sum(values)
+            # Recorder change is already a normalised increment; use its zero
+            # origin only to apply the same physical delta gate as live meters.
+            check = validate_counter_delta(
+                0, change, at, at + timedelta(hours=1), maximum, maximum_gap_s=3600
+            )
+            if not check.valid:
+                continue
+            if isinstance(cfg, CurveSourceConfig):
+                temp = temperatures.get(at)
+                if temp is None or temp < cfg.operating_limit_c:
+                    continue
+                cop = min(cfg.max_cop, max(cfg.min_cop, cfg.cop_curve.value_at(temp)))
+            else:
+                cop = cfg.cop
+            day = _day_key(at)
+            electricity[day] += change
+            delivered[day] += change * cop
+            covered[sid][day].add(at)
+    state, ingested = coordinator.ua_state, 0
+    for day in sorted(degree_hours):
+        if len(temp_hours[day]) < BACKFILL_MIN_TEMP_HOURS:
+            continue
+        length = local_day_length_s(day)
+        # A missing energy hour is an unknown heat subtotal, never a full day.
+        complete_heat = all(
+            source_meters[sid] and len(covered[sid][day]) * 3600 == length
+            for sid in coordinator.sources
+        )
+        coverage = min(1.0, len(temp_hours[day]) * 3600 / length) if complete_heat else 0.0
+        row = ua_learner.make_row(
+            date=day,
+            degree_hours=degree_hours[day],
+            delivered_kwh=delivered[day],
+            electricity_kwh=electricity[day],
+            wood_kwh=0,
+            backfilled=True,
+            coverage=coverage,
+        )
+        state = ua_learner.ingest(state, row)
+        ingested += 1
+    coordinator.ua_state = state
     coordinator.backfill_done = True
     coordinator.store.schedule_save(coordinator.store_snapshot(), SAVE_DELAY_S)
     return ingested

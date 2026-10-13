@@ -13,7 +13,7 @@ from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
 
 from .const import FUEL_UNIT_KG, FUEL_UNIT_KWH, FUEL_UNIT_M3, FUEL_UNIT_M3_LOOSE
 from .coordinator import LiveHeatingCostsConfigEntry, LiveHeatingCostsCoordinator
-from .entity import LiveHeatingCostsEntity
+from .entity import LiveHeatingCostsEntity, LiveHeatingCostsHubEntity
 from .models import StaticSourceConfig
 
 _FUEL_UNIT_SUFFIX = {
@@ -31,6 +31,7 @@ async def async_setup_entry(
 ) -> None:
     """Set up the fuel-price number for each static (fuel) source subentry."""
     coordinator = entry.runtime_data
+    async_add_entities([ComfortTargetNumber(coordinator)])
     for subentry_id, cfg in coordinator.sources.items():
         if isinstance(cfg, StaticSourceConfig):
             async_add_entities(
@@ -68,3 +69,25 @@ class FuelPriceNumber(LiveHeatingCostsEntity, NumberEntity):
 
     async def async_set_native_value(self, value: float) -> None:
         self.coordinator.async_set_fuel_price_override(self._subentry_id, value)
+
+
+class ComfortTargetNumber(LiveHeatingCostsHubEntity, NumberEntity):
+    """Dedicated room comfort target, independent of heat-pump sensor offsets."""
+
+    _attr_mode = NumberMode.BOX
+    _attr_native_min_value = 5.0
+    _attr_native_max_value = 30.0
+    _attr_native_step = 0.5
+    _attr_native_unit_of_measurement = "°C"
+
+    def __init__(self, coordinator):
+        super().__init__(coordinator, "comfort_target")
+
+    @property
+    def native_value(self):
+        return self.coordinator.shadow.target_c
+
+    async def async_set_native_value(self, value):
+        self.coordinator.shadow.set_target(value)
+        self.coordinator.store.schedule_save(self.coordinator.store_snapshot())
+        self.coordinator.async_set_updated_data(self.coordinator.build_hub_data())
