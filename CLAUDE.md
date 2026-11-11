@@ -249,3 +249,17 @@ HACS reads the version from `manifest.json` and also picks up GitHub releases.
 - Don't commit secrets; there aren't any in this integration's own config
   (entity IDs and computed numbers only — see `diagnostics.py`), but don't
   assume that stays true forever.
+
+## Branding / icon
+
+Home Assistant 2026.3 and newer load the bundled integration icon from
+`custom_components/live_heating_costs/brand/icon.png` (256 × 256) and
+`icon@2x.png` (512 × 512). The high-resolution artwork is kept at
+`brands/icon-master.png`; `brands/icon.svg`, `brands/icon.png` and `brands/icon@2x.png` remain as legacy artwork.
+The root `brands/` directory is not the integration's runtime asset location.
+
+Local branding requires no submission to `home-assistant/brands` and no
+manifest icon override. Older Home Assistant versions retain their existing
+icon fallback; this cosmetic update does not raise the supported HA minimum
+in `hacs.json`. The current HACS brand validator accepts the bundled
+`brand/icon.png`, so the validation workflow no longer ignores `brands`.

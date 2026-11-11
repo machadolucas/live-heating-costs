@@ -279,6 +279,15 @@ Copy `custom_components/live_heating_costs` into your Home Assistant
   rankings and a forecast, and that's the whole surface. Pair it with your
   own price-triggered automations if you want actuation.
 
+## Integration icon
+
+Home Assistant 2026.3 and newer use the bundled icon in
+[`custom_components/live_heating_costs/brand/`](custom_components/live_heating_costs/brand/).
+The package contains 256 px and 512 px PNGs; the high-resolution original is
+[`brands/icon-master.png`](brands/icon-master.png). Existing files under
+`brands/` are retained as legacy artwork. This cosmetic update leaves the
+integration's minimum Home Assistant version unchanged.
+
 ## Development
 
 ```bash
