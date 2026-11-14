@@ -290,18 +290,34 @@ integration's minimum Home Assistant version unchanged.
 
 ## Development
 
+Validation on 2026-11-14: 520 full-suite tests passed with 93.97% coverage;
+405 standalone pure tests passed without Home Assistant. Ruff lint and
+formatting passed. Runtime files and installed v0.5.1 are unchanged.
+
+The `uv.lock` environment is for development and tests only: Python is pinned to
+3.14.10, and Home Assistant 2026.11.1 is selected by an explicit uv override because
+pytest-homeassistant-custom-component 0.13.375 declares HA 2026.10.4. The integration's
+HACS runtime minimum in `hacs.json` is unchanged. Root conftest loads Home Assistant and
+the plugin only when both are installed; otherwise pure tests remain runnable with
+pytest alone. The compatibility shim for the plugin's removed logger helper raises if
+called.
+
 ```bash
-uv venv --python 3.13 .venv313
-uv pip install --python .venv313/bin/python -r requirements_test.txt
-.venv313/bin/python -m pytest
-.venv313/bin/ruff check . && .venv313/bin/ruff format --check .
+uv sync --locked
+uv run pytest
+uv run ruff check . && uv run ruff format --check .
 ```
 
-The pure engine modules (`curves`, `cost_engine`, `blend`, `demand`,
-`ua_learner`, `forecast`, `price_source`, `models`) have no Home Assistant
-import and are tested standalone with plain `pytest`; `tests/ha/` needs
-`pytest-homeassistant-custom-component`, which requires Python 3.13 (Home
-Assistant doesn't support 3.14 yet).
+The pure modules (`curves`, `cost_engine`, `blend`, `demand`, `ua_learner`,
+`forecast`, `price_source`, `models`, `calibration`, `telemetry`, and `thermal`)
+have no Home Assistant imports. Their tests load them from the integration source
+under a private namespace package, so Python does not execute the HA-only
+`custom_components.live_heating_costs.__init__` first. Relative imports between
+these source modules still resolve normally. HA tests under `tests/ha/` continue
+to import the integration by its real domain and need
+`pytest-homeassistant-custom-component` in the exact HA 2026.11.1 / Python
+3.14.10 development environment; the HACS runtime minimum remains in
+`hacs.json`.
 
 See [CLAUDE.md](CLAUDE.md) and [docs/architecture.md](docs/architecture.md)
 for architecture and design notes.

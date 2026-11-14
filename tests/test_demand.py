@@ -4,9 +4,12 @@ from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
 
+import _pure_imports  # noqa: F401 -- registers the isolated pure-module namespace
 import pytest
 
-from custom_components.live_heating_costs.demand import (
+# isort: split
+
+from _live_heating_costs_unit.demand import (
     daily_energy_kwh,
     instant_demand_kw,
     integrate_degree_hours,

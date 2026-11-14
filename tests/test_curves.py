@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+import _pure_imports  # noqa: F401 -- registers the isolated pure-module namespace
 import pytest
 
-from custom_components.live_heating_costs.curves import (
+# isort: split
+
+from _live_heating_costs_unit.curves import (
     PRESETS,
     Curve,
     CurveParseError,

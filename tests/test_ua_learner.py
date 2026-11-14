@@ -4,9 +4,12 @@ from __future__ import annotations
 
 from datetime import date, timedelta
 
+import _pure_imports  # noqa: F401 -- registers the isolated pure-module namespace
 import pytest
 
-from custom_components.live_heating_costs.const import (
+# isort: split
+
+from _live_heating_costs_unit.const import (
     UA_DELIVERED_RANGE_KWH,
     UA_EWMA_ALPHA_BACKFILL,
     UA_EWMA_ALPHA_LIVE,
@@ -15,7 +18,7 @@ from custom_components.live_heating_costs.const import (
     UA_ROWS_CAP,
     UA_SEED_BLEND_SAMPLES,
 )
-from custom_components.live_heating_costs.ua_learner import (
+from _live_heating_costs_unit.ua_learner import (
     DailyRow,
     UaState,
     effective_ua,
@@ -323,7 +326,7 @@ def _row(day: int = 1, **kwargs) -> DailyRow:
 
 
 def test_quality_gate_requires_temperature_coverage():
-    from custom_components.live_heating_costs.const import UA_MIN_COVERAGE
+    from _live_heating_costs_unit.const import UA_MIN_COVERAGE
 
     assert _row().quality is True  # default coverage = full day
     assert _row(coverage=UA_MIN_COVERAGE).quality is True

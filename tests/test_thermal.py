@@ -2,9 +2,12 @@
 
 from datetime import UTC, datetime, timedelta
 
+import _pure_imports  # noqa: F401 -- registers the isolated pure-module namespace
 import pytest
 
-from custom_components.live_heating_costs.thermal import (
+# isort: split
+
+from _live_heating_costs_unit.thermal import (
     DispatchSource,
     ThermalInputs,
     ThermalParameters,

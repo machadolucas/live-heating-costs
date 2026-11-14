@@ -4,10 +4,13 @@ from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
 
+import _pure_imports  # noqa: F401 -- registers the isolated pure-module namespace
 import pytest
 
-from custom_components.live_heating_costs import price_source as ps
-from custom_components.live_heating_costs.forecast import (
+# isort: split
+
+from _live_heating_costs_unit import price_source as ps
+from _live_heating_costs_unit.forecast import (
     SourceSlotCost,
     TempPoint,
     anchor_temps,
@@ -16,7 +19,7 @@ from custom_components.live_heating_costs.forecast import (
     forecast_attr_list,
     interp_temp,
 )
-from custom_components.live_heating_costs.price_source import ForecastSlot
+from _live_heating_costs_unit.price_source import ForecastSlot
 
 NOW = datetime(2026, 1, 10, 0, 0, tzinfo=UTC)
 
@@ -575,7 +578,7 @@ def _curve_forecast(cop_at, **kwargs):
 
 
 def test_modeled_cop_clamped_like_live_blend():
-    from custom_components.live_heating_costs.blend import blend_cop
+    from _live_heating_costs_unit.blend import blend_cop
 
     for raw in (12.0, 0.2):
         out = _curve_forecast(lambda _t, raw=raw: raw, min_cop=0.5, max_cop=6.5)

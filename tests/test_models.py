@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+import _pure_imports  # noqa: F401 -- registers the isolated pure-module namespace
 import pytest
 
-from custom_components.live_heating_costs.const import (
+# isort: split
+
+from _live_heating_costs_unit.const import (
     ACTIVITY_MODE_DURATION,
     ACTIVITY_MODE_EVENT,
     ACTIVITY_MODE_NONE,
@@ -39,8 +42,8 @@ from custom_components.live_heating_costs.const import (
     SOURCE_TYPE_DYNAMIC_FIXED,
     SOURCE_TYPE_STATIC,
 )
-from custom_components.live_heating_costs.cost_engine import wood_cost_eur_per_kwh
-from custom_components.live_heating_costs.models import (
+from _live_heating_costs_unit.cost_engine import wood_cost_eur_per_kwh
+from _live_heating_costs_unit.models import (
     ConfigError,
     CurveSourceConfig,
     DynamicFixedConfig,
@@ -340,7 +343,7 @@ def test_static_loose_m3_density_default():
 
 
 def test_curve_source_negative_standby_raises():
-    from custom_components.live_heating_costs.const import CONF_STANDBY_W
+    from _live_heating_costs_unit.const import CONF_STANDBY_W
 
     with pytest.raises(ConfigError) as exc_info:
         source_from_subentry(_curve_data(**{CONF_STANDBY_W: -1.0}))

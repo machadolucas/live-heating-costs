@@ -10,16 +10,19 @@ from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
 
+import _pure_imports  # noqa: F401 -- registers the isolated pure-module namespace
 import pytest
 
-from custom_components.live_heating_costs.blend import (
+# isort: split
+
+from _live_heating_costs_unit.blend import (
     Sample,
     blend_cop,
     is_active,
     is_producing_heat,
     window_cop,
 )
-from custom_components.live_heating_costs.const import DEFAULT_STANDBY_W, MIN_WINDOW_ENERGY_KWH
+from _live_heating_costs_unit.const import DEFAULT_STANDBY_W, MIN_WINDOW_ENERGY_KWH
 
 T0 = datetime(2026, 1, 15, 10, 0, tzinfo=UTC)
 
